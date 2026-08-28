@@ -92,28 +92,80 @@ Notes for anyone changing this:
 - `mlx-whisper` is Apple-Silicon-only, declared in `pyproject.toml` with a platform marker so the rest of the server still installs elsewhere.
 - The cache is keyed on the model, so changing `WHATSAPP_WHISPER_MODEL` re-transcribes rather than silently serving output from the previous one.
 
-Both env vars have working defaults: `WHATSAPP_WHISPER_MODEL` and `WHATSAPP_TRANSCRIPTS_DB`.
+`WHATSAPP_WHISPER_MODEL` and `WHATSAPP_TRANSCRIPTS_DB` are listed with the other settings under [Running multiple accounts](#settings).
 
 ## Running multiple accounts
 
-The goal is one instance per account — two of them, `whatsapp-us` and `whatsapp-brasil` — each with its own port, store, and device session. Five hardcoded values block that today:
+One checkout serves several accounts. Each instance is a bridge plus an MCP server sharing a name, a port, and a store directory; everything is set through the environment, so no code changes and no duplicated checkouts.
 
-| Location | Value |
-|---|---|
-| `whatsapp-bridge/main.go` | REST port literal `8080` |
-| `whatsapp-bridge/main.go` | `store/messages.db`, relative |
-| `whatsapp-bridge/main.go` | `store/whatsapp.db`, relative |
-| `whatsapp-mcp-server/whatsapp.py` | `MESSAGES_DB_PATH`, resolved against its own file |
-| `whatsapp-mcp-server/whatsapp.py` | `WHATSAPP_API_BASE_URL`, pinned to `localhost:8080` |
+**Never copy a store directory to create an instance.** `whatsapp.db` holds the device identity and Signal session — two bridges driving one session corrupt it and can get the device unlinked. Every instance gets its own QR scan.
 
-Until these are configurable, each account needs a full duplicate of the repo — which is itself hazardous, because **copying a folder copies `store/whatsapp.db` and therefore the WhatsApp device identity**. Two bridges sharing one Signal session corrupt it and can get the device unlinked, and both will fight over port 8080. Each instance must be linked by its own QR scan, never by copying a store.
+Two bridges, each from `whatsapp-bridge/`:
+
+```bash
+WHATSAPP_INSTANCE_NAME=whatsapp-us     WHATSAPP_STORE_DIR=store-us     WHATSAPP_BRIDGE_PORT=8080 go run main.go
+WHATSAPP_INSTANCE_NAME=whatsapp-brasil WHATSAPP_STORE_DIR=store-brasil WHATSAPP_BRIDGE_PORT=8081 go run main.go
+```
+
+Each prints its identity on startup (`Instance: … store: … port: …`) so two terminals are told apart at a glance.
+
+The matching Claude Desktop entries — note each server points at its own port and store:
+
+```json
+{
+  "mcpServers": {
+    "whatsapp-us": {
+      "command": "/path/to/uv",
+      "args": ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
+      "env": {
+        "WHATSAPP_INSTANCE_NAME": "whatsapp-us",
+        "WHATSAPP_INSTANCE_DESCRIPTION": "US number",
+        "WHATSAPP_STORE_DIR": "store-us",
+        "WHATSAPP_BRIDGE_URL": "http://localhost:8080"
+      }
+    },
+    "whatsapp-brasil": {
+      "command": "/path/to/uv",
+      "args": ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
+      "env": {
+        "WHATSAPP_INSTANCE_NAME": "whatsapp-brasil",
+        "WHATSAPP_INSTANCE_DESCRIPTION": "Brazilian number",
+        "WHATSAPP_STORE_DIR": "store-brasil",
+        "WHATSAPP_BRIDGE_URL": "http://localhost:8081"
+      }
+    }
+  }
+}
+```
+
+### Telling the model which account is which
+
+The instance name becomes the MCP server name, so the tools appear under `whatsapp-us` and `whatsapp-brasil` rather than as two identical `whatsapp` servers. On top of that the server sends `instructions` naming the account, repeating that it is read-only, and warning that several accounts may be connected and do not share messages or contacts — so a model that fails to find someone checks the other server rather than concluding they do not exist. `WHATSAPP_INSTANCE_DESCRIPTION` is free text appended to that; worth setting when more than one instance is connected.
+
+### Settings
+
+`WHATSAPP_STORE_DIR` is resolved the same way by both processes: absolute paths as given, relative ones against `whatsapp-bridge/`. So one value works for the pair.
+
+| Variable | Default | Used by |
+|---|---|---|
+| `WHATSAPP_INSTANCE_NAME` | `whatsapp` | both |
+| `WHATSAPP_STORE_DIR` | `store` | both |
+| `WHATSAPP_BRIDGE_PORT` | `8080` | bridge |
+| `WHATSAPP_BRIDGE_URL` | `http://localhost:8080` | server |
+| `WHATSAPP_INSTANCE_DESCRIPTION` | empty | server |
+| `WHATSAPP_MESSAGES_DB` | `<store>/messages.db` | server |
+| `WHATSAPP_TRANSCRIPTS_DB` | `<store>/transcriptions.db` | server |
+| `WHATSAPP_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | server |
+
+Every default reproduces the original single-account layout, so an install that sets nothing is unaffected. An unparseable port falls back to the default rather than refusing to start, and an empty value is treated as unset so an exported-but-blank `WHATSAPP_STORE_DIR` cannot point the bridge at the filesystem root.
 
 ## Commands
 
 There is no CI. Two test suites exist and both run in seconds:
 
 ```bash
-cd whatsapp-bridge && go test ./...                          # media direct-path handling
+cd whatsapp-bridge && go test ./...                                   # config + media direct-path handling
+uv run --directory whatsapp-mcp-server python test_config.py          # per-instance configuration
 uv run --directory whatsapp-mcp-server python test_transcription.py   # transcription + caching
 ```
 

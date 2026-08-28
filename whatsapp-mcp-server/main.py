@@ -16,9 +16,11 @@ from whatsapp import (
     get_media_type as whatsapp_get_media_type
 )
 import transcription
+import config
 
-# Initialize FastMCP server
-mcp = FastMCP("whatsapp")
+# Named per instance so two accounts are distinguishable to the model rather
+# than appearing as two identical "whatsapp" servers.
+mcp = FastMCP(config.INSTANCE_NAME, instructions=config.server_instructions())
 
 @mcp.tool()
 def search_contacts(query: str) -> List[Dict[str, Any]]:

@@ -7,6 +7,7 @@ whatsapp-bridge/store/
 # macOS
 .DS_Store
 
-# Any per-instance store dir (whatsapp-us/, whatsapp-brasil/, ...)
+# Message stores: personal data. Covers the default store/ and any
+# per-instance directory (store-us/, store-brasil/, ...).
 store/
-
+store-*/

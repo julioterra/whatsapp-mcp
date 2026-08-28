@@ -9,25 +9,18 @@ Results are cached in a database of their own rather than in messages.db,
 because the message store is disposable — it gets deleted and re-synced when
 a session breaks — and transcription is the expensive part to redo.
 """
-import os
 import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Optional
 
+import config
+
 # Whisper large-v3-turbo: measured at ~24x realtime and 1.7GB peak RSS on
 # Apple Silicon. The smaller models are quicker to load but mis-hear proper
 # names badly enough to make messages misleading rather than merely rough.
-MODEL_REPO = os.environ.get(
-    "WHATSAPP_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo"
-)
-
-_STORE_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store"
-)
-TRANSCRIPTS_DB_PATH = os.environ.get(
-    "WHATSAPP_TRANSCRIPTS_DB", os.path.join(_STORE_DIR, "transcriptions.db")
-)
+MODEL_REPO = config.WHISPER_MODEL
+TRANSCRIPTS_DB_PATH = config.TRANSCRIPTS_DB_PATH
 
 
 @dataclass

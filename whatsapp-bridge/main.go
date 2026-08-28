@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +32,47 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
+
+// Per-instance configuration, read once at startup. One checkout can serve
+// several WhatsApp accounts by running a bridge per account, each with its own
+// store directory and port. The defaults reproduce the original
+// single-account layout, so an install that sets nothing is unaffected.
+//
+// Two bridges must never share a store directory: store/whatsapp.db holds the
+// device identity and Signal session, and two processes driving one session
+// corrupt it and can get the device unlinked.
+var (
+	instanceName = envOr("WHATSAPP_INSTANCE_NAME", "whatsapp")
+	storeDir     = envOr("WHATSAPP_STORE_DIR", "store")
+	bridgePort   = envIntOr("WHATSAPP_BRIDGE_PORT", 8080)
+)
+
+func envOr(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
+// envIntOr falls back on an unparseable value rather than failing, so a typo
+// in a port number cannot stop the bridge from starting.
+func envIntOr(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		fmt.Printf("Ignoring %s=%q: not a number, using %d\n", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+// storePath builds a path inside this instance's store directory.
+func storePath(elem ...string) string {
+	return filepath.Join(append([]string{storeDir}, elem...)...)
+}
 
 // Message represents a chat message for our client
 type Message struct {
@@ -50,12 +92,12 @@ type MessageStore struct {
 // Initialize message store
 func NewMessageStore() (*MessageStore, error) {
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	if err := os.MkdirAll(storeDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	db, err := sql.Open("sqlite3", "file:"+storePath("messages.db")+"?_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -563,7 +605,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	var err error
 
 	// First, check if we already have this file
-	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+	chatDir := storePath(strings.ReplaceAll(chatJID, ":", "_"))
 	localPath := ""
 
 	// Get media info from the database
@@ -792,6 +834,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
+	// Say which account this process serves, so two bridges in two terminals
+	// are told apart at a glance.
+	fmt.Printf("Instance: %s   store: %s   port: %d\n", instanceName, storeDir, bridgePort)
+
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
@@ -800,12 +846,12 @@ func main() {
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	if err := os.MkdirAll(storeDir, 0755); err != nil {
 		logger.Errorf("Failed to create store directory: %v", err)
 		return
 	}
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:"+storePath("whatsapp.db")+"?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
@@ -911,7 +957,7 @@ func main() {
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
+	startRESTServer(client, messageStore, bridgePort)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

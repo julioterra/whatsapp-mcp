@@ -1,6 +1,90 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestEnvOr(t *testing.T) {
+	const key = "WHATSAPP_TEST_STRING"
+
+	if got := envOr(key, "fallback"); got != "fallback" {
+		t.Errorf("unset should use the fallback, got %q", got)
+	}
+
+	t.Setenv(key, "configured")
+	if got := envOr(key, "fallback"); got != "configured" {
+		t.Errorf("set should win, got %q", got)
+	}
+
+	// An empty value is treated as unset, so exporting an empty variable
+	// cannot silently point the bridge at the filesystem root.
+	t.Setenv(key, "")
+	if got := envOr(key, "fallback"); got != "fallback" {
+		t.Errorf("empty should use the fallback, got %q", got)
+	}
+}
+
+func TestEnvIntOr(t *testing.T) {
+	const key = "WHATSAPP_TEST_PORT"
+
+	if got := envIntOr(key, 8080); got != 8080 {
+		t.Errorf("unset should use the fallback, got %d", got)
+	}
+
+	t.Setenv(key, "8081")
+	if got := envIntOr(key, 8080); got != 8081 {
+		t.Errorf("set should win, got %d", got)
+	}
+
+	// A typo must not stop the bridge from starting.
+	t.Setenv(key, "eighty-eighty")
+	if got := envIntOr(key, 8080); got != 8080 {
+		t.Errorf("unparseable should fall back, got %d", got)
+	}
+}
+
+// Guards the actual point of the store setting: two instances must end up
+// with two separate databases, not one shared one.
+func TestNewMessageStoreUsesConfiguredDir(t *testing.T) {
+	original := storeDir
+	defer func() { storeDir = original }()
+
+	for _, name := range []string{"us", "brasil"} {
+		storeDir = filepath.Join(t.TempDir(), "store-"+name)
+
+		store, err := NewMessageStore()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+
+		if err := store.StoreChat("test@s.whatsapp.net", name, time.Now()); err != nil {
+			t.Fatalf("%s: storing a chat: %v", name, err)
+		}
+		store.Close()
+
+		if _, err := os.Stat(filepath.Join(storeDir, "messages.db")); err != nil {
+			t.Errorf("%s: messages.db not created in %s: %v", name, storeDir, err)
+		}
+	}
+}
+
+func TestStorePath(t *testing.T) {
+	original := storeDir
+	defer func() { storeDir = original }()
+
+	storeDir = "store-brasil"
+	if got, want := storePath("messages.db"), filepath.Join("store-brasil", "messages.db"); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	storeDir = "/tmp/whatsapp-us"
+	if got, want := storePath("media", "chat"), "/tmp/whatsapp-us/media/chat"; got != want {
+		t.Errorf("absolute store dir: got %q, want %q", got, want)
+	}
+}
 
 // The CDN rejects a direct path that has lost its query string, because
 // ccb/oh/oe are the signature. whatsmeow appends "&hash=..." to whatever we
