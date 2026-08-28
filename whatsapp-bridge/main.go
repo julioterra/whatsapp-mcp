@@ -77,12 +77,13 @@ func envSet(key string) bool {
 // account is `go run main.go us` rather than three environment variables.
 // Explicitly exported variables still win.
 //
-// Format is four whitespace-separated columns, the last being free text that
-// runs to the end of the line. Use "-" for a number you do not want checked.
+// Format is comma-separated, with the description in double quotes so its own
+// commas are no problem. Spacing around the commas is ignored. Leave the
+// number empty or write "-" to skip the check.
 //
-//	# name     port   number        description
-//	personal   8080   15555550134   Personal US number, family and friends
-//	work       8081   -             Work number, colleagues and clients
+//	# name, port, number, description
+//	personal, 8080, 15555550134, "Personal US number, family and friends"
+//	work,     8081, -,           "Work number, colleagues and clients"
 func loadInstance(name string) error {
 	data, err := os.ReadFile(instancesFile)
 	if err != nil {
@@ -95,18 +96,23 @@ func loadInstance(name string) error {
 			continue
 		}
 
-		fields := strings.Fields(line)
-		known = append(known, fields[0])
-		if fields[0] != name {
+		// At most four parts, so commas inside the description survive
+		// whether or not it is quoted.
+		parts := strings.SplitN(line, ",", 4)
+		entryName := unquote(parts[0])
+		known = append(known, entryName)
+		if entryName != name {
 			continue
 		}
-		if len(fields) < 2 {
-			return fmt.Errorf("%s: instance %q has no port", instancesFile, name)
+		if len(parts) < 2 {
+			return fmt.Errorf("%s: %q has no port. Expected: name, port, number, \"description\"",
+				instancesFile, name)
 		}
 
-		port, err := strconv.Atoi(fields[1])
+		port, err := strconv.Atoi(unquote(parts[1]))
 		if err != nil {
-			return fmt.Errorf("%s: instance %q has a bad port %q", instancesFile, name, fields[1])
+			return fmt.Errorf("%s: %q has %q where a port number should be",
+				instancesFile, name, strings.TrimSpace(parts[1]))
 		}
 
 		if !envSet("WHATSAPP_INSTANCE_NAME") {
@@ -118,18 +124,46 @@ func loadInstance(name string) error {
 		if !envSet("WHATSAPP_BRIDGE_PORT") {
 			bridgePort = port
 		}
-		if len(fields) > 2 && fields[2] != "-" && !envSet("WHATSAPP_ACCOUNT_NUMBER") {
-			expectedNumber = fields[2]
+
+		// The number is optional. Rather than trapping anyone who writes
+		// `personal, 8080, "My US number"` and turning their description
+		// into a phone number, only take it if it looks like one.
+		rest := parts[2:]
+		if len(rest) > 0 {
+			third := unquote(rest[0])
+			switch {
+			case third == "" || third == "-":
+				rest = rest[1:]
+			case len(normalizeNumber(third)) >= minPhoneDigits:
+				if !envSet("WHATSAPP_ACCOUNT_NUMBER") {
+					expectedNumber = third
+				}
+				rest = rest[1:]
+			}
 		}
-		if len(fields) > 3 {
-			instanceDescription = strings.Join(fields[3:], " ")
+		if len(rest) > 0 {
+			instanceDescription = unquote(strings.Join(rest, ","))
 		}
 		return nil
 	}
 
-	return fmt.Errorf("%s: no instance named %q (found: %s)",
+	return fmt.Errorf("%s: no account named %q. Found: %s",
 		instancesFile, name, strings.Join(known, ", "))
 }
+
+// unquote trims surrounding whitespace and a matching pair of double quotes,
+// so the quotes around a description are optional rather than load-bearing.
+func unquote(field string) string {
+	field = strings.TrimSpace(field)
+	if len(field) >= 2 && strings.HasPrefix(field, `"`) && strings.HasSuffix(field, `"`) {
+		field = field[1 : len(field)-1]
+	}
+	return strings.TrimSpace(field)
+}
+
+// Shortest run of digits still treated as a phone number rather than the
+// first word of a description. Real numbers with a country code are longer.
+const minPhoneDigits = 7
 
 // normalizeNumber strips the punctuation people write phone numbers with, so
 // "+55 11 99999-8888" and "5511999998888" compare equal.

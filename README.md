@@ -132,9 +132,29 @@ You can connect more than one account — your personal number and your work num
 
 **You never edit any code.** You fill in one small text file, then type one word to start each account.
 
-### 1. List your accounts in a file
+### 1. Create the accounts file
 
-In Terminal:
+You need a plain text file named **`instances.conf`**, saved in the **`whatsapp-bridge`** folder of this project.
+
+Sitting next to it is **`instances.conf.example`** — a filled-in example showing exactly the format. Open that to see what a finished file looks like, and use it as your starting point.
+
+Each line describes one account: four things separated by commas, with the description in double quotes.
+
+```
+personal, 8080, 15551234567,   "My US number, family and friends"
+work,     8081, 5511988887777, "Work number in Brazil, colleagues and clients"
+```
+
+| | What to put |
+|---|---|
+| **Name** | A short word you choose: `personal`, `work`, `us`, `brasil`. You type this to start the account, and Claude shows it as `whatsapp-personal`. |
+| **Port** | Just a number, and each account needs a different one. Use `8080` and `8081` unless something else on your computer is already using them. |
+| **Phone number** | The number for this account: country code first, digits only, no `+`, spaces or dashes. It's a safety check — the account refuses to start if a different phone scans the code. Leave it empty or write `-` to skip the check. |
+| **Description** | Plain English, in double quotes. Claude reads this to decide which account to use, so "Work number in Brazil, colleagues and clients" helps it far more than "work". |
+
+Commas inside the quotes are fine. Spaces around the commas don't matter — the example lines them up only because it's easier to read. Lines starting with `#` are ignored.
+
+**The quick way, in Terminal.** This copies the example to the right place under the right name and opens it for editing:
 
 ```bash
 cd whatsapp-bridge
@@ -142,23 +162,11 @@ cp instances.conf.example instances.conf
 open -e instances.conf
 ```
 
-That opens the file in TextEdit. Write one line per account:
+Replace the two example lines with your own accounts, then save and close.
 
-```
-personal   8080   15551234567     My US number, family and friends
-work       8081   5511988887777   Work number in Brazil, colleagues and clients
-```
+**If you'd rather create it by hand** in TextEdit: choose *Format → Make Plain Text* before saving, or it saves as rich text and the program can't read it. Save it as `instances.conf` — not `instances.conf.txt` — inside the `whatsapp-bridge` folder.
 
-Four things on each line, separated by spaces:
-
-| | What to put |
-|---|---|
-| **Name** | Anything short you'll recognise: `personal`, `work`, `us`, `brasil`. You'll type this to start the account, and Claude shows it as `whatsapp-personal`. |
-| **Port** | Just a number, and each account needs a different one. Use `8080` and `8081` unless you have a reason not to. |
-| **Phone number** | Digits only — country code first, no `+`, spaces or dashes. This is a safety check: the account will refuse to start if the wrong phone scans the code. Put `-` if you'd rather skip that check. |
-| **Description** | Plain English, to the end of the line. Claude reads this to decide which account to use, so "Work number in Brazil, colleagues and clients" helps it far more than "work". |
-
-Save the file and close it. Your phone numbers stay on your computer — this file is never uploaded or committed.
+Your phone numbers stay on your computer. This file is never uploaded or committed.
 
 ### 2. Start each account
 

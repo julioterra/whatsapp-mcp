@@ -1,25 +1,30 @@
-# One line per WhatsApp account. Copy this file to instances.conf and edit it.
+# Your WhatsApp accounts, one per line.
 #
-# instances.conf is gitignored, because it contains your phone numbers.
+# Copy this file to instances.conf and edit that copy. instances.conf stays on
+# your computer and is never committed, because it holds your phone numbers.
 #
-#   name       port   number          description
+# Each line has four things, separated by commas:
 #
-# name         Short label you choose: personal, work, us, brasil. It becomes
-#              the store directory (store-<name>) and the server name Claude
-#              sees (whatsapp-<name>), so pick something you'd recognise in a
-#              list.
+#     name, port, number, "description"
 #
-# port         Any free port. Each account needs its own.
+# name         A short word you choose: personal, work, us, brasil. You type
+#              this to start the account, and Claude shows it as
+#              whatsapp-personal.
 #
-# number       The phone number this account must be linked to, digits only,
-#              with country code. The bridge prints the number that actually
-#              scanned the QR code and refuses to start if it is not this one,
-#              so a label can never quietly point at the wrong account.
-#              Use "-" to skip the check.
+# port         Just a number. Each account needs a different one. Use 8080,
+#              8081, 8082 and so on unless something else is already using them.
 #
-# description  Free text, runs to the end of the line. Claude is told this, so
-#              it knows which account to use. "Work number, colleagues and
-#              clients" is far more useful to it than "work".
+# number       The phone number for this account: country code first, digits
+#              only. The account refuses to start if a different phone scans
+#              the code, so a label can never point at the wrong account.
+#              Leave it empty or write - to skip that check.
+#
+# description  In double quotes, in plain English. Claude reads this to decide
+#              which account to use, so "Work number in Brazil, colleagues and
+#              clients" helps it much more than "work". Commas are fine inside
+#              the quotes.
+#
+# Spaces around the commas don't matter. Lines starting with # are ignored.
 
-personal   8080   15555550134     Personal US number, family and friends
-work       8081   5511999998888   Work Brazil number, colleagues and clients
+personal, 8080, 15551234567,   "My US number, family and friends"
+work,     8081, 5511988887777, "Work number in Brazil, colleagues and clients"

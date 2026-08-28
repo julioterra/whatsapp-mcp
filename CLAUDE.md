@@ -101,12 +101,12 @@ One checkout serves several accounts. An account is a bridge plus an MCP server 
 **The configuration surface is `whatsapp-bridge/instances.conf`, not environment variables.** Env vars still work and take precedence, but they are the override, not the interface — the file is what a user edits. It is gitignored (it holds phone numbers); `instances.conf.example` is the committed template.
 
 ```
-# name     port   number          description
-personal   8080   15551234567     Personal US number, family and friends
-work       8081   -               Work number, colleagues and clients
+# name, port, number, "description"
+personal, 8080, 15551234567, "Personal US number, family and friends"
+work,     8081, -,           "Work number, colleagues and clients"
 ```
 
-Four whitespace-separated columns, the description running to end of line. `-` skips the number check. From `whatsapp-bridge/`:
+Comma-separated, description quoted so its own commas survive. Parsing is deliberately forgiving: quotes optional, spacing ignored, and the number is only taken as a number if it has at least `minPhoneDigits` digits — otherwise `personal, 8080, "My US number"` would silently turn the description into a phone number and then refuse to connect. Empty or `-` skips the check. From `whatsapp-bridge/`:
 
 ```bash
 go run main.go personal      # name selects the entry

@@ -18,11 +18,13 @@ TMP = tempfile.mkdtemp(prefix="whatsapp-config-test-")
 
 CONF = os.path.join(TMP, "instances.conf")
 with open(CONF, "w") as fh:
-    fh.write("""
-# name     port   number          description
-personal   8080   15555550134     Personal US number, family and friends
-work       8081   -               Work number, colleagues and clients
-""")
+    fh.write(
+        '# name, port, number, "description"\n'
+        'personal, 8080, 15555550134, "Personal US number, family and friends"\n'
+        'work,     8081, -,           "Work number, colleagues and clients"\n'
+        'nonumber, 8082, "My US number, family"\n'
+        'loose,8083,15555550199,Unquoted description\n' 
+    )
 
 failures = []
 
@@ -76,6 +78,19 @@ w = resolve(WHATSAPP_INSTANCES_FILE=CONF, WHATSAPP_INSTANCE_NAME="work")
 check("second account gets its own port", w["bridge"] == "http://localhost:8081", w["bridge"])
 check("second account gets its own store", w["store"] != p["store"])
 check("second account gets its own transcripts", w["transcripts"] != p["transcripts"])
+
+print("\nthe file forgives how you write it")
+check("commas inside a quoted description survive",
+      p["description"] == "Personal US number, family and friends", p["description"])
+
+n = resolve(WHATSAPP_INSTANCES_FILE=CONF, WHATSAPP_INSTANCE_NAME="nonumber")
+check("a skipped number is not eaten from the description",
+      n["description"] == "My US number, family", n["description"])
+check("no number claimed for it", "number" not in n["account"])
+
+lo = resolve(WHATSAPP_INSTANCES_FILE=CONF, WHATSAPP_INSTANCE_NAME="loose")
+check("no spaces around commas is fine", lo["bridge"] == "http://localhost:8083", lo["bridge"])
+check("quotes are optional", lo["description"] == "Unquoted description", lo["description"])
 
 print("\nthe label is reported, but so is the real number")
 store = os.path.join(BRIDGE_DIR, "store-linked")

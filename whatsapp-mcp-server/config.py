@@ -23,11 +23,28 @@ _INSTANCES_FILE = os.environ.get(
 )
 
 
+# Shortest run of digits still treated as a phone number rather than the first
+# word of a description. Real numbers with a country code are longer.
+_MIN_PHONE_DIGITS = 7
+
+
+def _digits(text: str) -> str:
+    return "".join(c for c in text if c.isdigit())
+
+
+def _unquote(field: str) -> str:
+    """Trim whitespace and a matching pair of double quotes."""
+    field = field.strip()
+    if len(field) >= 2 and field.startswith('"') and field.endswith('"'):
+        field = field[1:-1]
+    return field.strip()
+
+
 def _read_instance(name):
     """Return the instances.conf entry for `name`, or an empty dict.
 
-    Columns are: name, port, number, description — description running to
-    the end of the line. A number of "-" means "don't check".
+    Lines are: name, port, number, "description". The description is quoted
+    so its own commas are fine; an empty number or "-" means don't check.
     """
     try:
         with open(_INSTANCES_FILE) as fh:
@@ -39,14 +56,25 @@ def _read_instance(name):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        fields = line.split()
-        if fields[0] != name or len(fields) < 2:
+
+        # At most four parts, so commas inside the description survive.
+        parts = line.split(",", 3)
+        if _unquote(parts[0]) != name or len(parts) < 2:
             continue
-        entry = {"port": fields[1]}
-        if len(fields) > 2 and fields[2] != "-":
-            entry["number"] = fields[2]
-        if len(fields) > 3:
-            entry["description"] = " ".join(fields[3:])
+        entry = {"port": _unquote(parts[1])}
+
+        # The number is optional. Treat it as one only if it looks like one,
+        # so `personal, 8080, "My US number"` keeps its description.
+        rest = parts[2:]
+        if rest:
+            third = _unquote(rest[0])
+            if third in ("", "-"):
+                rest = rest[1:]
+            elif len(_digits(third)) >= _MIN_PHONE_DIGITS:
+                entry["number"] = third
+                rest = rest[1:]
+        if rest:
+            entry["description"] = _unquote(",".join(rest))
         return entry
     return {}
 

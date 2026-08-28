@@ -78,10 +78,10 @@ func saveInstanceVars(t *testing.T) {
 
 func TestLoadInstance(t *testing.T) {
 	writeConf(t, `
-# name     port   number          description
-personal   8080   15555550134     Personal US number, family and friends
-work       8081   -               Work number, colleagues
-minimal    8082
+# name, port, number, "description"
+personal, 8080, 15555550134, "Personal US number, family and friends"
+work,     8081, -,           "Work number, colleagues"
+minimal,  8082
 `)
 
 	t.Run("full entry", func(t *testing.T) {
@@ -104,6 +104,61 @@ minimal    8082
 		// The description runs to the end of the line, commas and all.
 		if instanceDescription != "Personal US number, family and friends" {
 			t.Errorf("description = %q", instanceDescription)
+		}
+	})
+
+	t.Run("a missing number column is not mistaken for one", func(t *testing.T) {
+		// "personal 8080 My US number, family" -- the whole tail is the
+		// description, and no number check is armed.
+		writeConf(t, "nonumber, 8083, \"My US number, family and friends\"\n")
+		saveInstanceVars(t)
+		expectedNumber = ""
+		if err := loadInstance("nonumber"); err != nil {
+			t.Fatal(err)
+		}
+		if expectedNumber != "" {
+			t.Errorf("should not have taken a number, got %q", expectedNumber)
+		}
+		if instanceDescription != "My US number, family and friends" {
+			t.Errorf("description = %q", instanceDescription)
+		}
+	})
+
+	t.Run("spacing around commas is ignored and quotes are optional", func(t *testing.T) {
+		writeConf(t, "loose,8084,15551234567,Unquoted description\n")
+		saveInstanceVars(t)
+		if err := loadInstance("loose"); err != nil {
+			t.Fatal(err)
+		}
+		if bridgePort != 8084 || expectedNumber != "15551234567" {
+			t.Errorf("port = %d, number = %q", bridgePort, expectedNumber)
+		}
+		if instanceDescription != "Unquoted description" {
+			t.Errorf("description = %q", instanceDescription)
+		}
+	})
+
+	t.Run("an empty number field skips the check", func(t *testing.T) {
+		writeConf(t, "blank, 8085, , \"Some account\"\n")
+		saveInstanceVars(t)
+		expectedNumber = ""
+		if err := loadInstance("blank"); err != nil {
+			t.Fatal(err)
+		}
+		if expectedNumber != "" {
+			t.Errorf("expected no check, got %q", expectedNumber)
+		}
+		if instanceDescription != "Some account" {
+			t.Errorf("description = %q", instanceDescription)
+		}
+	})
+
+	t.Run("a bad port says so in plain words", func(t *testing.T) {
+		writeConf(t, "oops, eighty-eighty, -, \"Typo\"\n")
+		saveInstanceVars(t)
+		err := loadInstance("oops")
+		if err == nil || !strings.Contains(err.Error(), "eighty-eighty") {
+			t.Errorf("error should quote the bad value, got %v", err)
 		}
 	})
 
