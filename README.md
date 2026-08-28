@@ -172,20 +172,31 @@ Your phone numbers stay on your computer. This file is never uploaded or committ
 
 Photos, PDFs and voice notes aren't downloaded until you ask for them. By default they're written inside this project folder — fine for the program, a bad place to go looking for a PDF later.
 
-Add a line to `instances.conf` to put them somewhere useful:
+Add a line to `instances.conf` to send them somewhere useful:
 
 ```
-media_dir = ~/Claude/whatsapp
+media_dir = /Users/you/Documents/WhatsApp downloads
 ```
 
-`~/Claude` is the folder Claude Desktop already uses for files, so that's usually the right answer. Any folder works.
+**What you can write as the path:**
+
+| | |
+|---|---|
+| A full path | `/Users/you/Documents/WhatsApp downloads` |
+| Spaces in folder names | Fine, and no quotes needed: `/Users/you/Documents/5. Claude/Downloads` |
+| Commas in folder names | Also fine: `/Users/you/Photos, scans/WhatsApp` |
+| Quotes around it | Optional. `"/Users/you/My Folder"` works too |
+| `~/` for your home folder | Works: `~/Claude/whatsapp` is your home folder's `Claude/whatsapp` |
+| `~someone-else/` | Not understood. It stops and asks for the full path. |
+
+`~/Claude` is the folder Claude Desktop already uses for files, so `media_dir = ~/Claude/whatsapp` is usually the convenient choice. Any folder works.
 
 Files land in `media_dir/<account name>/<chat>/`, so `personal` and `work` never overwrite each other's copy of the same document from the same person.
 
 The bridge prints where downloads are going when it starts, so you can check at a glance:
 
 ```
-Downloads: /Users/you/Claude/whatsapp/personal
+Downloads: /Users/you/Documents/WhatsApp downloads/personal
 ```
 
 Leave the line out and nothing changes from before.

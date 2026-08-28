@@ -230,9 +230,75 @@ func TestExpandHome(t *testing.T) {
 	if got := expandHome(""); got != "" {
 		t.Errorf("empty should stay empty, got %q", got)
 	}
-	// Not a home reference: a directory that merely starts with a tilde.
-	if got := expandHome("~weird"); got != "~weird" {
+	// Another user's home is left alone here and rejected by checkMediaDir,
+	// rather than half-imitating what a shell does.
+	if got := expandHome("~root/Documents"); got != "~root/Documents" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestCheckMediaDir(t *testing.T) {
+	original := mediaDir
+	defer func() { mediaDir = original }()
+
+	for _, ok := range []string{"", "/Users/someone/Claude", "/Users/someone/5. Claude/Downloads"} {
+		mediaDir = ok
+		if err := checkMediaDir(); err != nil {
+			t.Errorf("%q should be accepted: %v", ok, err)
+		}
+	}
+
+	// A shell resolves this; nothing here can, and creating a folder called
+	// "~root" would put downloads somewhere nobody would look.
+	mediaDir = "~root/Documents"
+	err := checkMediaDir()
+	if err == nil {
+		t.Fatal("expected ~otheruser to be rejected")
+	}
+	if !strings.Contains(err.Error(), "full") {
+		t.Errorf("error should say to write the full path, got %v", err)
+	}
+}
+
+func TestSettingLine(t *testing.T) {
+	tests := []struct {
+		line    string
+		key     string
+		value   string
+		setting bool
+	}{
+		{`media_dir = /Users/me/Claude`, "media_dir", "/Users/me/Claude", true},
+		{`media_dir = "/Users/me/5. Claude/Downloads"`, "media_dir", "/Users/me/5. Claude/Downloads", true},
+		// A comma in the folder name must not turn this into an account line.
+		{`media_dir = /Users/me/Photos, scans/WhatsApp`, "media_dir", "/Users/me/Photos, scans/WhatsApp", true},
+		{`personal, 8080, -, "Mine"`, "", "", false},
+		{`# a comment`, "", "", false},
+		{``, "", "", false},
+	}
+
+	for _, tt := range tests {
+		key, value, ok := settingLine(tt.line)
+		if ok != tt.setting || key != tt.key || value != tt.value {
+			t.Errorf("settingLine(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tt.line, key, value, ok, tt.key, tt.value, tt.setting)
+		}
+	}
+}
+
+// A settings line must not be offered as an account name when someone mistypes.
+func TestSettingsAreNotAccounts(t *testing.T) {
+	writeConf(t, "media_dir = /tmp/media\npersonal, 8080, -, \"Mine\"\n")
+	saveInstanceVars(t)
+
+	err := loadInstance("typo")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "media_dir") {
+		t.Errorf("settings line listed as an account: %v", err)
+	}
+	if !strings.Contains(err.Error(), "personal") {
+		t.Errorf("real account missing from %v", err)
 	}
 }
 

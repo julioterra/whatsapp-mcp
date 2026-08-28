@@ -34,8 +34,18 @@ work,     8081, 5511988887777, "Work number in Brazil, colleagues and clients"
 #
 # Without this they go inside this project folder, which is fine for the
 # program but a bad place to find a PDF later. Point it somewhere you and
-# Claude can both reach. ~/Claude is the folder Claude Desktop uses for files,
-# so this is usually the right answer:
+# Claude can both reach.
+#
+# Write a full path. Spaces and commas in folder names are fine, and quotes
+# around the path are optional:
+#
+#     media_dir = /Users/you/Documents/5. Claude/Downloads
+#
+# ~/ also works and means your own home folder. ~someone-else/ does not --
+# it will stop and ask for the full path.
+#
+# ~/Claude is the folder Claude Desktop uses for files, so this is usually
+# the convenient answer:
 
 media_dir = ~/Claude/whatsapp
 

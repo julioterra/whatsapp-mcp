@@ -96,6 +96,12 @@ func loadInstance(name string) error {
 			continue
 		}
 
+		// Settings lines live in the same file; they are not accounts and
+		// must not appear in the list of names a typo is compared against.
+		if _, _, isSetting := settingLine(line); isSetting {
+			continue
+		}
+
 		// At most four parts, so commas inside the description survive
 		// whether or not it is quoted.
 		parts := strings.SplitN(line, ",", 4)
@@ -164,24 +170,37 @@ func loadSettings() {
 	}
 
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.Contains(line, ",") {
+		key, value, ok := settingLine(line)
+		if !ok {
 			continue
 		}
 
-		key, value, found := strings.Cut(line, "=")
-		if !found {
-			continue
-		}
-
-		switch strings.TrimSpace(key) {
+		switch key {
 		case "media_dir":
 			// An exported variable still wins, as everywhere else.
 			if !envSet("WHATSAPP_MEDIA_DIR") {
-				mediaDir = expandHome(unquote(value))
+				mediaDir = expandHome(value)
 			}
 		}
 	}
+}
+
+// settingLine reports whether a line is `key = value` rather than an account.
+//
+// The test is a comma before the "=", not anywhere in the line: a perfectly
+// reasonable folder name contains a comma, and treating the whole line as an
+// account because of one would silently drop the setting.
+func settingLine(line string) (key, value string, ok bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", "", false
+	}
+
+	key, value, found := strings.Cut(line, "=")
+	if !found || strings.Contains(key, ",") {
+		return "", "", false
+	}
+	return strings.TrimSpace(key), unquote(value), true
 }
 
 // unquote trims surrounding whitespace and a matching pair of double quotes,
@@ -272,8 +291,14 @@ func storePath(elem ...string) string {
 // and photos in the repo where other applications will not look for them.
 var mediaDir = expandHome(os.Getenv("WHATSAPP_MEDIA_DIR"))
 
-// expandHome resolves a leading ~, which a shell would expand but a value set
-// in a JSON config or a settings file would not.
+// expandHome resolves a leading ~/ into the home directory.
+//
+// A shell does this before the program ever runs, but a value written in
+// instances.conf or a JSON config never passes through a shell, so it would
+// otherwise arrive as a literal tilde and create a directory called "~".
+//
+// Only "~" and "~/..." are handled. A shell also understands "~someuser", and
+// deliberately not imitating that halfway is why checkMediaDir exists.
 func expandHome(path string) string {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
@@ -283,6 +308,23 @@ func expandHome(path string) string {
 		return filepath.Join(home, strings.TrimPrefix(path, "~"))
 	}
 	return path
+}
+
+// checkMediaDir rejects a path that still starts with ~ after expansion.
+//
+// "~someuser/Documents" means another person's home folder to a shell, but
+// nothing here can resolve it. Silently creating a folder literally named
+// "~someuser" would scatter downloads somewhere nobody would think to look.
+func checkMediaDir() error {
+	if !strings.HasPrefix(mediaDir, "~") {
+		return nil
+	}
+	return fmt.Errorf(
+		"media_dir %q cannot be resolved.\n"+
+			"Only ~/ is understood, meaning your own home folder.\n"+
+			"Write the path out in full instead, for example:\n"+
+			"    media_dir = /Users/you/Documents/WhatsApp downloads",
+		mediaDir)
 }
 
 // mediaPath returns the directory for one chat's downloaded attachments.
@@ -1061,6 +1103,11 @@ func main() {
 	// Say which account this process serves, so two bridges in two terminals
 	// are told apart at a glance.
 	loadSettings()
+
+	if err := checkMediaDir(); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// `go run main.go us` selects an instance from instances.conf.
 	if len(os.Args) > 1 {

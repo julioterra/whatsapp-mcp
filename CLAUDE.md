@@ -120,7 +120,9 @@ Attachments default to `<store>/<chat_jid>/`, which keeps personal files inside 
 
 When set, the path is `<media_dir>/<instance>/<chat_jid>/`. The account level is not decoration: a direct chat is named after the *other* party, so the same JID appears on every account, and two accounts sharing a media directory would otherwise overwrite each other's copy of `Document.pdf` from the same sender. Keep it if you touch `mediaPath`.
 
-Leading `~` is expanded in Go, because a value coming from a JSON config or the settings file never passes through a shell.
+Path handling, all covered by tests: full paths, spaces and commas inside folder names, and optional surrounding quotes. `~/` is expanded in Go, because a value from `instances.conf` or a JSON config never passes through a shell and would otherwise create a directory literally named `~`. `~otheruser` is deliberately *not* imitated — `checkMediaDir` rejects it at startup rather than half-supporting shell syntax.
+
+`settingLine` distinguishes `key = value` from an account by looking for a comma *before* the `=`, not anywhere in the line, so a folder name containing a comma does not silently turn the setting into a malformed account entry. `loadInstance` skips settings lines so they never appear in the "no account named" suggestion list.
 
 ### The label must not be able to lie
 
