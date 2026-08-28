@@ -68,14 +68,35 @@ Consequences worth knowing before writing a query:
 - **Media is metadata-only at rest.** The message row stores the URL and decryption keys; bytes are fetched on demand by `download_media` and written to `whatsapp-bridge/store/<chat_jid>/<filename>`.
 - **Group senders** are bare JIDs in `messages.sender`; `get_sender_name` resolves them back through `chats`.
 - `store/whatsapp.db` is separate and belongs to whatsmeow — device identity and Signal session state. Do not query or migrate it.
+- `store/transcriptions.db` is a **sidecar** written by the MCP server, not the bridge. It is deliberately not a table inside `messages.db`, because the message store is disposable — resetting a broken sync deletes it — and transcription is the expensive part to redo.
 
 ### Working directory matters
 
 The bridge opens `store/...` by **relative** path. Run it from inside `whatsapp-bridge/` or it will silently create a second, empty database elsewhere. The MCP server resolves the same file by absolute path relative to its own source file, so a bridge started from the wrong directory shows up as "tools work, but no new messages ever arrive."
 
+## Voice message transcription
+
+`transcribe_audio(message_id, chat_jid)` turns a voice note into text. It downloads the audio if needed, transcribes it, and caches the result.
+
+Transcription runs **locally**, on this machine, via `mlx-whisper` on the GPU. Voice notes are personal messages; sending them to a hosted API would contradict the rule the rest of this install is built around. That constraint drove the engine choice, but it cost nothing — measured on real voice notes, MLX beat CPU `faster-whisper` on both axes:
+
+| Engine | Speed | Peak RSS |
+|---|---|---|
+| `faster-whisper`, large-v3-turbo, int8 CPU | 2.5x realtime | 2.03 GB |
+| **`mlx-whisper`, large-v3-turbo, GPU** | **24x realtime** | **1.72 GB** |
+
+Notes for anyone changing this:
+
+- **Do not drop to a smaller model to save memory.** `small` runs faster but mis-hears proper names and produces plausible-looking wrong sentences, which is worse than a slow transcript — a wrong name in a household or contractor message is actively misleading.
+- The model is loaded lazily on first use and cached by `mlx_whisper` for the process lifetime, so an idle server costs nothing. First use downloads ~1.6GB.
+- `mlx-whisper` is Apple-Silicon-only, declared in `pyproject.toml` with a platform marker so the rest of the server still installs elsewhere.
+- The cache is keyed on the model, so changing `WHATSAPP_WHISPER_MODEL` re-transcribes rather than silently serving output from the previous one.
+
+Both env vars have working defaults: `WHATSAPP_WHISPER_MODEL` and `WHATSAPP_TRANSCRIPTS_DB`.
+
 ## Running multiple accounts
 
-The goal is one instance per account (`whatsapp-us`, `whatsapp-brasil`, …), each with its own port, store, and device session. Five hardcoded values block that today:
+The goal is one instance per account — two of them, `whatsapp-us` and `whatsapp-brasil` — each with its own port, store, and device session. Five hardcoded values block that today:
 
 | Location | Value |
 |---|---|
@@ -89,7 +110,14 @@ Until these are configurable, each account needs a full duplicate of the repo �
 
 ## Commands
 
-There are no tests, linters, or CI in this repo. The meaningful checks are "does the bridge compile" and "does the MCP server start."
+There is no CI. Two test suites exist and both run in seconds:
+
+```bash
+cd whatsapp-bridge && go test ./...                          # media direct-path handling
+uv run --directory whatsapp-mcp-server python test_transcription.py   # transcription + caching
+```
+
+The Python test synthesises its own speech with macOS `say` rather than checking in an audio fixture, because the only real audio here is personal messages.
 
 **Start the bridge** (must stay running; blocks until Ctrl+C):
 
@@ -127,7 +155,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/api/downl
 sqlite3 whatsapp-bridge/store/messages.db '.schema' 'select count(*) from messages;'
 ```
 
-`ffmpeg` is only needed by `audio.py` for voice-message conversion, which is part of the disabled send path. It is not required for anything this install does.
+`ffmpeg` is **required**: `mlx_whisper` shells out to it to decode Opus, so transcription fails without it. (`audio.py` also uses it, but that is part of the disabled send path.)
 
 ## Data sensitivity
 
@@ -162,6 +190,8 @@ This discards local history and re-syncs from WhatsApp — and WhatsApp only rep
 | Send tools visible | Invariant broken. Stop and flag. |
 | Sudden disconnect | Device unlinked, or the 4-device cap was hit |
 | `CGO_ENABLED=0` build error | `go-sqlite3` needs cgo; a C toolchain must be on PATH |
+| Every media download returns 403 | Bridge is running a binary from before the direct-path fix. Restart it. |
+| Transcription fails on every file | `ffmpeg` missing, or not Apple Silicon (`mlx-whisper` will not have installed) |
 
 ## Editing the Claude Desktop config
 

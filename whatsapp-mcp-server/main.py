@@ -12,8 +12,10 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    get_media_type as whatsapp_get_media_type
 )
+import transcription
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
@@ -245,6 +247,63 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+@mcp.tool()
+def transcribe_audio(message_id: str, chat_jid: str, language: str = None) -> Dict[str, Any]:
+    """Transcribe a WhatsApp voice message or audio file to text.
+
+    Downloads the audio if it is not already on disk, then transcribes it
+    locally. Results are cached, so asking for the same message twice is
+    instant. Use this whenever a message shows media_type 'audio' and you
+    need to know what was said.
+
+    Args:
+        message_id: The ID of the message containing the audio
+        chat_jid: The JID of the chat containing the message
+        language: Optional ISO code ('en', 'pt') to skip language detection.
+                  Leave unset to detect automatically.
+
+    Returns:
+        A dictionary with the transcript text, detected language, audio
+        duration, and whether the result came from cache
+    """
+    media_type = whatsapp_get_media_type(message_id, chat_jid)
+    if media_type is None:
+        return {
+            "success": False,
+            "message": "No such message, or it carries no media"
+        }
+    if media_type != "audio":
+        return {
+            "success": False,
+            "message": f"Message media type is '{media_type}', not audio"
+        }
+
+    cached = transcription.get_cached(message_id, chat_jid)
+    if cached is None:
+        file_path = whatsapp_download_media(message_id, chat_jid)
+        if not file_path:
+            return {
+                "success": False,
+                "message": "Could not download the audio. Is the WhatsApp bridge running?"
+            }
+        try:
+            result = transcription.transcribe_message(
+                message_id, chat_jid, file_path, language=language
+            )
+        except Exception as e:
+            return {"success": False, "message": f"Transcription failed: {e}"}
+    else:
+        result = cached
+
+    return {
+        "success": True,
+        "text": result.text,
+        "language": result.language,
+        "duration_seconds": round(result.duration_seconds, 1),
+        "cached": result.cached,
+        "model": result.model
+    }
 
 if __name__ == "__main__":
     # Initialize and run the server

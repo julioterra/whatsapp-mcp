@@ -8,4 +8,7 @@ dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=1.6.0",
     "requests>=2.32.3",
+    # Apple Silicon only: transcription falls back to unavailable elsewhere
+    # rather than blocking install of the rest of the server.
+    "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]

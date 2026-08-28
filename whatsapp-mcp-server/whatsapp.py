@@ -724,6 +724,29 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
+def get_media_type(message_id: str, chat_jid: str) -> Optional[str]:
+    """Return a message's media type ('audio', 'image', 'video', 'document').
+
+    Returns None when the message does not exist or carries no media, so
+    callers can tell "not a voice message" apart from "no such message".
+    """
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT media_type FROM messages WHERE id = ? AND chat_jid = ?",
+            (message_id, chat_jid),
+        )
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else None
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return None
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path.
     
