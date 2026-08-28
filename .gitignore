@@ -10,5 +10,3 @@ whatsapp-bridge/store/
 # Any per-instance store dir (whatsapp-us/, whatsapp-brasil/, ...)
 store/
 
-# Local development notes: personal context, not for the public fork
-CLAUDE.md
