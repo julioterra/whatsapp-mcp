@@ -59,6 +59,21 @@ def main():
     check("reports a duration", result.duration_seconds > 0, f"{result.duration_seconds:.1f}s")
     check("is not marked cached", result.cached is False)
 
+    # media_dir can point anywhere, so a voice note may sit under a folder
+    # with spaces, commas or an apostrophe in its name. mlx_whisper shells out
+    # to ffmpeg, which is exactly where a badly handled path would break.
+    print("\ntranscribing from an awkward path")
+    awkward = os.path.join(TMP, "5. Claude, scans", "WhatsApp downloads",
+                           "personal", "alice@s.whatsapp.net")
+    os.makedirs(awkward, exist_ok=True)
+    moved = os.path.join(awkward, "audio 2026-08-28 (1).ogg")
+    shutil.copy(audio, moved)
+
+    elsewhere = transcription.transcribe_file(moved)
+    check("spaces and commas in the path are fine",
+          "brown fox" in elsewhere.text.lower(), moved.replace(TMP, "…"))
+    check("same text as from the plain path", elsewhere.text == result.text)
+
     print("\ntranscribe_message caching")
     first = transcription.transcribe_message(MESSAGE_ID, CHAT_JID, audio)
     second = transcription.transcribe_message(MESSAGE_ID, CHAT_JID, audio)

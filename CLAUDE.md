@@ -122,6 +122,8 @@ When set, the path is `<media_dir>/<instance>/<chat_jid>/`. The account level is
 
 Path handling, all covered by tests: full paths, spaces and commas inside folder names, and optional surrounding quotes. `~/` is expanded in Go, because a value from `instances.conf` or a JSON config never passes through a shell and would otherwise create a directory literally named `~`. `~otheruser` is deliberately *not* imitated — `checkMediaDir` rejects it at startup rather than half-supporting shell syntax.
 
+Transcription follows the media directory automatically: `transcribe_audio` uses the absolute path the bridge returns from `/api/download` and never reconstructs one, so the Python side has no knowledge of the layout. Keep it that way. The transcript cache is keyed on `(message_id, chat_jid, model)` rather than the path, so moving `media_dir` does not invalidate existing transcripts. There is a test covering transcription from a path containing spaces and commas, since `mlx_whisper` shells out to ffmpeg.
+
 `settingLine` distinguishes `key = value` from an account by looking for a comma *before* the `=`, not anywhere in the line, so a folder name containing a comma does not silently turn the setting into a malformed account entry. `loadInstance` skips settings lines so they never appear in the "no account named" suggestion list.
 
 ### The label must not be able to lie
