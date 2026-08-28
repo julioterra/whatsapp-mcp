@@ -7,7 +7,7 @@ This is a fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-m
 1. **Sending is deliberately disabled.** See [Why this fork is read-only](#why-this-fork-is-read-only).
 2. **Voice messages can be transcribed**, locally, with no audio leaving the machine.
 3. **Media downloads work.** Upstream drops the CDN signature when reconstructing a media path, so every download returns HTTP 403.
-4. **One checkout can serve several accounts**, each with its own name, port and message store, configured through the environment.
+4. **One copy can serve several accounts** — personal and work, say — each labelled, kept separate, and set up by editing one text file rather than any code.
 
 It connects to your personal WhatsApp account through the WhatsApp Web multi-device API (via [whatsmeow](https://github.com/tulir/whatsmeow)). Messages are stored locally in SQLite and are only ever sent to a model when a tool you invoked reads them.
 
@@ -126,163 +126,169 @@ Language is detected automatically; pass `language` ("en", "pt") to skip detecti
 
 Transcripts are cached in `whatsapp-bridge/store/transcriptions.db` — deliberately separate from `messages.db`, which is disposable and gets deleted when a broken sync is reset.
 
-## Running more than one account
+## Running more than one WhatsApp account
 
-An **instance** is one bridge plus one MCP server, sharing a name, a port and a store directory. Everything is set through the environment, so several accounts run from a single checkout with no code changes and no duplicated repos.
+You can connect more than one account — your personal number and your work number, for example. Claude sees them as two clearly labelled sources and knows which is which.
 
-> **Never copy a store directory to create an instance.** `whatsapp.db` holds the device identity and Signal session. Two bridges driving the same session corrupt it and can get the device unlinked. Every instance is linked by its own QR scan.
+**You never edit any code.** You fill in one small text file, then type one word to start each account.
 
-The walkthrough below sets up two accounts. Decide the three values per account first — everything else follows from them:
+### 1. List your accounts in a file
 
-| | Name | Store directory | Port |
-|---|---|---|---|
-| US number | `whatsapp-us` | `store-us` | 8080 |
-| Brazilian number | `whatsapp-brasil` | `store-brasil` | 8081 |
-
-Any names, directories and free ports work. Keep the store directories starting with `store-`, which is already gitignored.
-
-### Step 1 — Start the first bridge
-
-From `whatsapp-bridge/`, in its own terminal. It stays running:
+In Terminal:
 
 ```bash
 cd whatsapp-bridge
-WHATSAPP_INSTANCE_NAME=whatsapp-us \
-WHATSAPP_STORE_DIR=store-us \
-WHATSAPP_BRIDGE_PORT=8080 \
-go run main.go
+cp instances.conf.example instances.conf
+open -e instances.conf
 ```
 
-It prints its identity first, so you can confirm you launched the one you meant:
+That opens the file in TextEdit. Write one line per account:
 
 ```
-Instance: whatsapp-us   store: store-us   port: 8080
+personal   8080   15551234567     My US number, family and friends
+work       8081   5511988887777   Work number in Brazil, colleagues and clients
 ```
 
-Then it prints a QR code. Scan it from the **US** phone: WhatsApp → Settings → Linked Devices → Link a Device. Wait for `✓ Connected to WhatsApp!`.
+Four things on each line, separated by spaces:
 
-First sync takes a while — 15 minutes or more on a busy account. It's finished when the message count stops climbing.
+| | What to put |
+|---|---|
+| **Name** | Anything short you'll recognise: `personal`, `work`, `us`, `brasil`. You'll type this to start the account, and Claude shows it as `whatsapp-personal`. |
+| **Port** | Just a number, and each account needs a different one. Use `8080` and `8081` unless you have a reason not to. |
+| **Phone number** | Digits only — country code first, no `+`, spaces or dashes. This is a safety check: the account will refuse to start if the wrong phone scans the code. Put `-` if you'd rather skip that check. |
+| **Description** | Plain English, to the end of the line. Claude reads this to decide which account to use, so "Work number in Brazil, colleagues and clients" helps it far more than "work". |
 
-### Step 2 — Start the second bridge
+Save the file and close it. Your phone numbers stay on your computer — this file is never uploaded or committed.
 
-A **second terminal**, different name, different store, different port:
+### 2. Start each account
+
+One Terminal window per account. To start the first:
 
 ```bash
 cd whatsapp-bridge
-WHATSAPP_INSTANCE_NAME=whatsapp-brasil \
-WHATSAPP_STORE_DIR=store-brasil \
-WHATSAPP_BRIDGE_PORT=8081 \
-go run main.go
+go run main.go personal
 ```
 
-Scan this QR from the **Brazilian** phone. Two different phones, two different codes — this is the step that must not be shortcut by copying files.
+That last word is the name from your file. You'll see it confirm what it's doing:
 
-### Step 3 — Confirm both bridges are up
+```
+Instance: personal   store: store-personal   port: 8080
+Expecting account: +15551234567
+```
+
+Then a QR code appears. On the phone for **that** account, open WhatsApp → Settings → Linked Devices → Link a Device, and scan it.
+
+If you scan with the wrong phone, it stops immediately and tells you:
+
+```
+wrong account: "personal" expects +15551234567 but the QR code was
+scanned by +5511988887777. Nothing has been synced.
+```
+
+Nothing gets mixed up, and nothing is downloaded. Scan again with the right phone.
+
+Once it connects it prints the number it linked to, so you can see it's the right one:
+
+```
+Instance "personal" is linked to +15551234567
+
+✓ Connected to WhatsApp!
+```
+
+**Leave this window open.** Closing it stops that account from receiving new messages.
+
+Now open a **second** Terminal window and do the same for the other account:
 
 ```bash
-for port in 8080 8081; do
-  printf '%s -> ' "$port"
-  curl -s -o /dev/null -w '%{http_code}\n' --max-time 3 -X POST "http://localhost:$port/api/download"
-done
+cd whatsapp-bridge
+go run main.go work
 ```
 
-`400` on both means both are listening (the request is deliberately empty, so a bridge that's up rejects it). `000` means that bridge isn't running.
+Scan with the other phone. Two windows, two accounts, both running.
 
-Sanity-check that they really are separate accounts:
+The first time each account connects it downloads your message history. That can take fifteen minutes or more on a busy account.
+
+### 3. Tell Claude about them
+
+Open Claude Desktop's settings file:
 
 ```bash
-for s in store-us store-brasil; do
-  printf '%-14s %s messages\n' "$s" "$(sqlite3 "whatsapp-bridge/$s/messages.db" 'select count(*) from messages;')"
-done
+open -e ~/Library/Application\ Support/Claude/claude_desktop_config.json
 ```
 
-Two different numbers, and two directories that both exist, mean the stores aren't shared.
-
-### Step 4 — Tell Claude Desktop about both
-
-Add both to `~/Library/Application Support/Claude/claude_desktop_config.json`. If it already contains other MCP servers, add these keys alongside them rather than replacing the file:
+Add one block per account inside `"mcpServers"`. **Only the name changes between them** — everything else is identical:
 
 ```json
 {
   "mcpServers": {
-    "whatsapp-us": {
+    "whatsapp-personal": {
       "command": "/path/to/uv",
       "args": ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
-      "env": {
-        "WHATSAPP_INSTANCE_NAME": "whatsapp-us",
-        "WHATSAPP_INSTANCE_DESCRIPTION": "US number",
-        "WHATSAPP_STORE_DIR": "store-us",
-        "WHATSAPP_BRIDGE_URL": "http://localhost:8080"
-      }
+      "env": { "WHATSAPP_INSTANCE_NAME": "personal" }
     },
-    "whatsapp-brasil": {
+    "whatsapp-work": {
       "command": "/path/to/uv",
       "args": ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
-      "env": {
-        "WHATSAPP_INSTANCE_NAME": "whatsapp-brasil",
-        "WHATSAPP_INSTANCE_DESCRIPTION": "Brazilian number",
-        "WHATSAPP_STORE_DIR": "store-brasil",
-        "WHATSAPP_BRIDGE_URL": "http://localhost:8081"
-      }
+      "env": { "WHATSAPP_INSTANCE_NAME": "work" }
     }
   }
 }
 ```
 
-The two things that must differ per entry are `WHATSAPP_STORE_DIR` and `WHATSAPP_BRIDGE_URL`. Pointing both at the same store is the mistake to watch for: the servers would then report the same messages under two names.
+The port, the message storage and the description all come from `instances.conf`, so you don't repeat them here.
 
-Run `which uv` for the command path. The `--directory` argument is the same for both — one checkout serves both accounts.
+For the two paths: run `which uv` in Terminal to get the first one. The second is wherever you put this project, with `/whatsapp-mcp-server` on the end.
 
-### Step 5 — Restart Claude Desktop and check
+If the file already has other things in it, add these alongside them rather than replacing everything.
 
-Fully quit with ⌘Q, not just closing the window, then reopen. You should see both servers listed. Ask it something like *"which WhatsApp accounts can you see?"* — it should name both and be able to list chats from each separately.
+### 4. Restart Claude Desktop
 
-### Keeping them running
+Quit it properly with ⌘Q — closing the window isn't enough — then open it again.
 
-Both bridges must stay running for downloads and transcription; reads keep working from the local database even when a bridge is down, just with increasingly stale data. If you close a terminal, that instance stops syncing.
+Ask it *"which WhatsApp accounts can you see?"* It should name both.
 
-Each device link expires roughly every 20 days **independently**, so the two will drift out of sync with each other. When one prints a QR again, scan it with that account's phone — nothing else is affected.
+### What Claude understands about your accounts
 
-### More than two accounts
+Each account tells Claude its name, your description of it, and the actual phone number it's linked to. It also knows three things that prevent common mistakes:
 
-Nothing caps it at two. A third is the same three decisions again:
+- It **cannot send messages** from any account.
+- The accounts hold **completely separate** messages and chats.
+- **The same person can appear on both** — a colleague who's also a friend, or someone who has both your numbers. So a conversation with somebody may be split across the two, and one account may only show you half of it. Claude is told to check the other account before concluding it has someone's full history, and to say which account anything came from.
 
-```bash
-WHATSAPP_INSTANCE_NAME=whatsapp-work \
-WHATSAPP_STORE_DIR=store-work \
-WHATSAPP_BRIDGE_PORT=8082 \
-go run main.go
-```
+### If something goes wrong
 
-The real limits:
+| What you see | What it means |
+|---|---|
+| `no instance named "..."` | The name you typed isn't in `instances.conf`. The message lists the names that are. |
+| `wrong account: ... expects ...` | You scanned with the other phone. Nothing was saved; just run it again and scan with the right one. |
+| `address already in use` | Two accounts have the same port. Give them different numbers in `instances.conf`. |
+| Both accounts show the same messages | They're sharing storage. Check each line in `instances.conf` has a different name. |
+| A QR code appears again later | Normal. WhatsApp expires each link about every 20 days, separately per account. Scan with that account's phone. |
 
-- **One free port per instance.** Ports are the only thing instances contend over.
-- **Memory during transcription.** Roughly 1.7GB per instance that is actively transcribing; the model loads lazily, so idle instances cost nothing. Two at once peak around 3.4GB.
-- **Disk.** Each store holds that account's full history plus any downloaded attachments.
-- **WhatsApp's four-device limit is per account**, not per machine, so separate accounts don't compete. It only bites if you link the same number to more than four devices, counting your other computers and browsers.
+### Adding a third account
 
-### Telling the model which account is which
+Add another line to `instances.conf` with a new name and an unused port, run `go run main.go thatname`, scan, and add one more block to Claude's settings. There's no limit built in. What you'll actually run into: each account needs its own port, each keeps its own copy of that history on disk, and transcribing voice messages uses about 1.7GB of memory per account while it's working — around 3.4GB if both transcribe at the same time.
 
-The instance name becomes the MCP server name, so tools appear under `whatsapp-us` and `whatsapp-brasil` instead of two identical `whatsapp` servers.
+## Configuration reference
 
-Each server also sends the model instructions naming its account, restating that it is read-only, and warning that other WhatsApp servers may be connected which share no messages or contacts. That last part matters: without it, a model that fails to find a contact on one account may conclude the person doesn't exist, rather than checking the other. `WHATSAPP_INSTANCE_DESCRIPTION` is free text appended to those instructions — "Brazilian number, family and building contractors" is more useful to a model than a bare name.
+For one account, nothing needs configuring — the defaults work. For several, `whatsapp-bridge/instances.conf` is the file to edit; see [Running more than one WhatsApp account](#running-more-than-one-whatsapp-account).
 
-## Configuration
-
-`WHATSAPP_STORE_DIR` is resolved identically by both processes — absolute paths as given, relative ones against `whatsapp-bridge/` — so a single value configures the pair.
+Everything can also be overridden with environment variables, which take precedence over the file. This is mostly useful for one-off runs and testing.
 
 | Variable | Default | Used by |
 |---|---|---|
 | `WHATSAPP_INSTANCE_NAME` | `whatsapp` | both |
-| `WHATSAPP_STORE_DIR` | `store` | both |
-| `WHATSAPP_BRIDGE_PORT` | `8080` | bridge |
-| `WHATSAPP_BRIDGE_URL` | `http://localhost:8080` | server |
-| `WHATSAPP_INSTANCE_DESCRIPTION` | empty | server |
+| `WHATSAPP_STORE_DIR` | `store`, or `store-<name>` for a named account | both |
+| `WHATSAPP_BRIDGE_PORT` | `8080`, or the port from `instances.conf` | bridge |
+| `WHATSAPP_ACCOUNT_NUMBER` | the number from `instances.conf` | bridge |
+| `WHATSAPP_BRIDGE_URL` | `http://localhost:<port>` | server |
+| `WHATSAPP_INSTANCE_DESCRIPTION` | the description from `instances.conf` | both |
+| `WHATSAPP_INSTANCES_FILE` | `whatsapp-bridge/instances.conf` | both |
 | `WHATSAPP_MESSAGES_DB` | `<store>/messages.db` | server |
 | `WHATSAPP_TRANSCRIPTS_DB` | `<store>/transcriptions.db` | server |
 | `WHATSAPP_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | server |
 
-Every default reproduces the original single-account layout, so setting nothing changes nothing. An unparseable port falls back to the default rather than refusing to start, and an empty value counts as unset so a blank `WHATSAPP_STORE_DIR` can't point the bridge at the filesystem root.
+A relative `WHATSAPP_STORE_DIR` is resolved against `whatsapp-bridge/` by both processes, so one value configures the pair. A bad port falls back to the default rather than refusing to start, and an empty value counts as unset.
 
 ## Tests
 

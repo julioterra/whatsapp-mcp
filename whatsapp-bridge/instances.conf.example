@@ -1,0 +1,25 @@
+# One line per WhatsApp account. Copy this file to instances.conf and edit it.
+#
+# instances.conf is gitignored, because it contains your phone numbers.
+#
+#   name       port   number          description
+#
+# name         Short label you choose: personal, work, us, brasil. It becomes
+#              the store directory (store-<name>) and the server name Claude
+#              sees (whatsapp-<name>), so pick something you'd recognise in a
+#              list.
+#
+# port         Any free port. Each account needs its own.
+#
+# number       The phone number this account must be linked to, digits only,
+#              with country code. The bridge prints the number that actually
+#              scanned the QR code and refuses to start if it is not this one,
+#              so a label can never quietly point at the wrong account.
+#              Use "-" to skip the check.
+#
+# description  Free text, runs to the end of the line. Claude is told this, so
+#              it knows which account to use. "Work number, colleagues and
+#              clients" is far more useful to it than "work".
+
+personal   8080   15555550134     Personal US number, family and friends
+work       8081   5511999998888   Work Brazil number, colleagues and clients

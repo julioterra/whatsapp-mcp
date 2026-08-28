@@ -96,68 +96,57 @@ Notes for anyone changing this:
 
 ## Running multiple accounts
 
-One checkout serves several accounts. Each instance is a bridge plus an MCP server sharing a name, a port, and a store directory; everything is set through the environment, so no code changes and no duplicated checkouts.
+One checkout serves several accounts. An account is a bridge plus an MCP server sharing a name, a port and a store directory.
 
-**Never copy a store directory to create an instance.** `whatsapp.db` holds the device identity and Signal session — two bridges driving one session corrupt it and can get the device unlinked. Every instance gets its own QR scan.
+**The configuration surface is `whatsapp-bridge/instances.conf`, not environment variables.** Env vars still work and take precedence, but they are the override, not the interface — the file is what a user edits. It is gitignored (it holds phone numbers); `instances.conf.example` is the committed template.
 
-Two bridges, each from `whatsapp-bridge/`:
+```
+# name     port   number          description
+personal   8080   15551234567     Personal US number, family and friends
+work       8081   -               Work number, colleagues and clients
+```
+
+Four whitespace-separated columns, the description running to end of line. `-` skips the number check. From `whatsapp-bridge/`:
 
 ```bash
-WHATSAPP_INSTANCE_NAME=whatsapp-us     WHATSAPP_STORE_DIR=store-us     WHATSAPP_BRIDGE_PORT=8080 go run main.go
-WHATSAPP_INSTANCE_NAME=whatsapp-brasil WHATSAPP_STORE_DIR=store-brasil WHATSAPP_BRIDGE_PORT=8081 go run main.go
+go run main.go personal      # name selects the entry
 ```
 
-Each prints its identity on startup (`Instance: … store: … port: …`) so two terminals are told apart at a glance.
+`store-<name>` and the port are derived, so the only thing typed is the name. An unknown name errors and lists the names that do exist. The MCP server needs one variable, `WHATSAPP_INSTANCE_NAME`, and reads the same file for everything else.
 
-The matching Claude Desktop entries — note each server points at its own port and store:
+### The label must not be able to lie
 
-```json
-{
-  "mcpServers": {
-    "whatsapp-us": {
-      "command": "/path/to/uv",
-      "args": ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
-      "env": {
-        "WHATSAPP_INSTANCE_NAME": "whatsapp-us",
-        "WHATSAPP_INSTANCE_DESCRIPTION": "US number",
-        "WHATSAPP_STORE_DIR": "store-us",
-        "WHATSAPP_BRIDGE_URL": "http://localhost:8080"
-      }
-    },
-    "whatsapp-brasil": {
-      "command": "/path/to/uv",
-      "args": ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
-      "env": {
-        "WHATSAPP_INSTANCE_NAME": "whatsapp-brasil",
-        "WHATSAPP_INSTANCE_DESCRIPTION": "Brazilian number",
-        "WHATSAPP_STORE_DIR": "store-brasil",
-        "WHATSAPP_BRIDGE_URL": "http://localhost:8081"
-      }
-    }
-  }
-}
-```
+Which account a bridge serves is decided by **whichever phone scans the QR code**. The name is only a label, so nothing structurally prevented scanning the Brazilian phone into `store-us` and having Claude confidently report Brazilian messages as US ones.
 
-### Telling the model which account is which
+`confirmAccount` closes that: after login it reads `client.Store.ID.User` — the real linked number — prints it, and if `instances.conf` names a different number, exits before syncing anything. It then writes `instance.json` into the store, which `config.linked_account()` reads so the model is told the verified number rather than the label alone.
 
-The instance name becomes the MCP server name, so the tools appear under `whatsapp-us` and `whatsapp-brasil` rather than as two identical `whatsapp` servers. On top of that the server sends `instructions` naming the account, repeating that it is read-only, and warning that several accounts may be connected and do not share messages or contacts — so a model that fails to find someone checks the other server rather than concluding they do not exist. `WHATSAPP_INSTANCE_DESCRIPTION` is free text appended to that; worth setting when more than one instance is connected.
+If you touch this area, keep that property: a label that can silently disagree with reality is worse than no label, because it is trusted.
+
+### What the model is told
+
+The name becomes the MCP server name (`whatsapp-personal`), and `server_instructions()` states the account name, its description, and the verified phone number. It also carries two warnings that exist because they are easy to get wrong:
+
+- Other WhatsApp servers may be connected, holding entirely separate data.
+- **The same person can appear on more than one account** — a colleague who is also a friend, someone who has both numbers. A conversation may be split across accounts, so one account can show only half of it. The model is told to check the others before concluding something is absent or complete, and to attribute what it reports to an account.
 
 ### Settings
 
-`WHATSAPP_STORE_DIR` is resolved the same way by both processes: absolute paths as given, relative ones against `whatsapp-bridge/`. So one value works for the pair.
+Relative `WHATSAPP_STORE_DIR` resolves against `whatsapp-bridge/` in both processes, so one value configures the pair.
 
-| Variable | Default | Used by |
-|---|---|---|
-| `WHATSAPP_INSTANCE_NAME` | `whatsapp` | both |
-| `WHATSAPP_STORE_DIR` | `store` | both |
-| `WHATSAPP_BRIDGE_PORT` | `8080` | bridge |
-| `WHATSAPP_BRIDGE_URL` | `http://localhost:8080` | server |
-| `WHATSAPP_INSTANCE_DESCRIPTION` | empty | server |
-| `WHATSAPP_MESSAGES_DB` | `<store>/messages.db` | server |
-| `WHATSAPP_TRANSCRIPTS_DB` | `<store>/transcriptions.db` | server |
-| `WHATSAPP_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | server |
+| Variable | Default |
+|---|---|
+| `WHATSAPP_INSTANCE_NAME` | `whatsapp` |
+| `WHATSAPP_STORE_DIR` | `store`, or `store-<name>` when named |
+| `WHATSAPP_BRIDGE_PORT` | `8080`, or the conf file's port |
+| `WHATSAPP_ACCOUNT_NUMBER` | the conf file's number |
+| `WHATSAPP_BRIDGE_URL` | `http://localhost:<port>` |
+| `WHATSAPP_INSTANCE_DESCRIPTION` | the conf file's description |
+| `WHATSAPP_INSTANCES_FILE` | `instances.conf` |
+| `WHATSAPP_MESSAGES_DB` | `<store>/messages.db` |
+| `WHATSAPP_TRANSCRIPTS_DB` | `<store>/transcriptions.db` |
+| `WHATSAPP_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` |
 
-Every default reproduces the original single-account layout, so an install that sets nothing is unaffected. An unparseable port falls back to the default rather than refusing to start, and an empty value is treated as unset so an exported-but-blank `WHATSAPP_STORE_DIR` cannot point the bridge at the filesystem root.
+Defaults reproduce the original single-account layout. A bad port falls back rather than refusing to start; an empty value counts as unset so a blank store dir cannot point at the filesystem root.
 
 ## Commands
 

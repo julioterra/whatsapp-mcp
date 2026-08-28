@@ -11,3 +11,6 @@ whatsapp-bridge/store/
 # per-instance directory (store-us/, store-brasil/, ...).
 store/
 store-*/
+
+# Your accounts and phone numbers
+whatsapp-bridge/instances.conf

@@ -20,7 +20,7 @@ import config
 
 # Named per instance so two accounts are distinguishable to the model rather
 # than appearing as two identical "whatsapp" servers.
-mcp = FastMCP(config.INSTANCE_NAME, instructions=config.server_instructions())
+mcp = FastMCP(config.SERVER_NAME, instructions=config.server_instructions())
 
 @mcp.tool()
 def search_contacts(query: str) -> List[Dict[str, Any]]:

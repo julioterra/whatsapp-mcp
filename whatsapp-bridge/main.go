@@ -47,11 +47,137 @@ var (
 	bridgePort   = envIntOr("WHATSAPP_BRIDGE_PORT", 8080)
 )
 
+// expectedNumber, when set, is the phone number this instance is supposed to
+// be linked to. Which account a bridge actually serves is decided by whichever
+// phone scans the QR code -- the instance name is only a label -- so without
+// this there is nothing to catch scanning the wrong phone and quietly filling
+// store-us with the Brazilian account.
+var expectedNumber = os.Getenv("WHATSAPP_ACCOUNT_NUMBER")
+
+// Free text describing whose account this is, passed on to the model so it can
+// pick the right one. "Work number, colleagues and clients" beats "work".
+var instanceDescription = os.Getenv("WHATSAPP_INSTANCE_DESCRIPTION")
+
+// instancesFile is read relative to whatsapp-bridge/, which is where the
+// bridge already expects to be started from.
+var instancesFile = envOr("WHATSAPP_INSTANCES_FILE", "instances.conf")
+
 func envOr(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
 	return fallback
+}
+
+func envSet(key string) bool {
+	return os.Getenv(key) != ""
+}
+
+// loadInstance applies the named entry from instances.conf, so starting an
+// account is `go run main.go us` rather than three environment variables.
+// Explicitly exported variables still win.
+//
+// Format is four whitespace-separated columns, the last being free text that
+// runs to the end of the line. Use "-" for a number you do not want checked.
+//
+//	# name     port   number        description
+//	personal   8080   15555550134   Personal US number, family and friends
+//	work       8081   -             Work number, colleagues and clients
+func loadInstance(name string) error {
+	data, err := os.ReadFile(instancesFile)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %v", instancesFile, err)
+	}
+
+	var known []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		known = append(known, fields[0])
+		if fields[0] != name {
+			continue
+		}
+		if len(fields) < 2 {
+			return fmt.Errorf("%s: instance %q has no port", instancesFile, name)
+		}
+
+		port, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return fmt.Errorf("%s: instance %q has a bad port %q", instancesFile, name, fields[1])
+		}
+
+		if !envSet("WHATSAPP_INSTANCE_NAME") {
+			instanceName = name
+		}
+		if !envSet("WHATSAPP_STORE_DIR") {
+			storeDir = "store-" + name
+		}
+		if !envSet("WHATSAPP_BRIDGE_PORT") {
+			bridgePort = port
+		}
+		if len(fields) > 2 && fields[2] != "-" && !envSet("WHATSAPP_ACCOUNT_NUMBER") {
+			expectedNumber = fields[2]
+		}
+		if len(fields) > 3 {
+			instanceDescription = strings.Join(fields[3:], " ")
+		}
+		return nil
+	}
+
+	return fmt.Errorf("%s: no instance named %q (found: %s)",
+		instancesFile, name, strings.Join(known, ", "))
+}
+
+// normalizeNumber strips the punctuation people write phone numbers with, so
+// "+55 11 99999-8888" and "5511999998888" compare equal.
+func normalizeNumber(number string) string {
+	var digits strings.Builder
+	for _, r := range number {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	return digits.String()
+}
+
+// confirmAccount reports which number actually answered the QR scan, and stops
+// if it is not the one this instance expects. Continuing would sync a whole
+// account into the wrong store under the wrong name.
+func confirmAccount(client *whatsmeow.Client) error {
+	if client.Store.ID == nil {
+		return fmt.Errorf("not logged in")
+	}
+	linked := client.Store.ID.User
+
+	fmt.Printf("\nInstance %q is linked to +%s\n", instanceName, linked)
+
+	if expectedNumber != "" && normalizeNumber(expectedNumber) != normalizeNumber(linked) {
+		return fmt.Errorf(
+			"wrong account: %q expects +%s but the QR code was scanned by +%s.\n"+
+				"Nothing has been synced. Either scan with the other phone, or correct the\n"+
+				"number for %q in instances.conf. To start over, delete %s and run again",
+			instanceName, normalizeNumber(expectedNumber), linked, instanceName, storeDir)
+	}
+
+	// Recorded so the MCP server can tell the model which account it is
+	// reading, rather than trusting the label.
+	record := map[string]string{
+		"instance":    instanceName,
+		"description": instanceDescription,
+		"number":      linked,
+		"push_name":   client.Store.PushName,
+		"linked_at":   time.Now().Format(time.RFC3339),
+	}
+	encoded, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return nil // identity is confirmed; failing to cache it is not fatal
+	}
+	os.WriteFile(storePath("instance.json"), encoded, 0644)
+
+	return nil
 }
 
 // envIntOr falls back on an unparseable value rather than failing, so a typo
@@ -836,7 +962,18 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 func main() {
 	// Say which account this process serves, so two bridges in two terminals
 	// are told apart at a glance.
+	// `go run main.go us` selects an instance from instances.conf.
+	if len(os.Args) > 1 {
+		if err := loadInstance(os.Args[1]); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	fmt.Printf("Instance: %s   store: %s   port: %d\n", instanceName, storeDir, bridgePort)
+	if expectedNumber != "" {
+		fmt.Printf("Expecting account: +%s\n", normalizeNumber(expectedNumber))
+	}
 
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
@@ -954,7 +1091,15 @@ func main() {
 		return
 	}
 
-	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
+	// Confirm which account actually answered the QR scan before syncing
+	// anything into this instance's store.
+	if err := confirmAccount(client); err != nil {
+		fmt.Printf("\n%v\n", err)
+		client.Disconnect()
+		os.Exit(1)
+	}
+
+	fmt.Println("\n✓ Connected to WhatsApp!")
 
 	// Start REST API server
 	startRESTServer(client, messageStore, bridgePort)

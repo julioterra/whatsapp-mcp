@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,6 +45,117 @@ func TestEnvIntOr(t *testing.T) {
 	if got := envIntOr(key, 8080); got != 8080 {
 		t.Errorf("unparseable should fall back, got %d", got)
 	}
+}
+
+func TestNormalizeNumber(t *testing.T) {
+	// People write numbers with punctuation; the comparison must not care.
+	for _, in := range []string{"+55 11 99999-8888", "5511999998888", "+5511999998888", "(55) 11 99999 8888"} {
+		if got := normalizeNumber(in); got != "5511999998888" {
+			t.Errorf("normalizeNumber(%q) = %q", in, got)
+		}
+	}
+}
+
+func writeConf(t *testing.T, body string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "instances.conf")
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	original := instancesFile
+	instancesFile = path
+	t.Cleanup(func() { instancesFile = original })
+}
+
+func saveInstanceVars(t *testing.T) {
+	t.Helper()
+	name, dir, port, number, desc := instanceName, storeDir, bridgePort, expectedNumber, instanceDescription
+	t.Cleanup(func() {
+		instanceName, storeDir, bridgePort = name, dir, port
+		expectedNumber, instanceDescription = number, desc
+	})
+}
+
+func TestLoadInstance(t *testing.T) {
+	writeConf(t, `
+# name     port   number          description
+personal   8080   15555550134     Personal US number, family and friends
+work       8081   -               Work number, colleagues
+minimal    8082
+`)
+
+	t.Run("full entry", func(t *testing.T) {
+		saveInstanceVars(t)
+		if err := loadInstance("personal"); err != nil {
+			t.Fatal(err)
+		}
+		if instanceName != "personal" {
+			t.Errorf("name = %q", instanceName)
+		}
+		if storeDir != "store-personal" {
+			t.Errorf("store = %q", storeDir)
+		}
+		if bridgePort != 8080 {
+			t.Errorf("port = %d", bridgePort)
+		}
+		if expectedNumber != "15555550134" {
+			t.Errorf("number = %q", expectedNumber)
+		}
+		// The description runs to the end of the line, commas and all.
+		if instanceDescription != "Personal US number, family and friends" {
+			t.Errorf("description = %q", instanceDescription)
+		}
+	})
+
+	t.Run("dash means do not check the number", func(t *testing.T) {
+		saveInstanceVars(t)
+		expectedNumber = ""
+		if err := loadInstance("work"); err != nil {
+			t.Fatal(err)
+		}
+		if expectedNumber != "" {
+			t.Errorf("expected no number check, got %q", expectedNumber)
+		}
+		if instanceDescription != "Work number, colleagues" {
+			t.Errorf("description = %q", instanceDescription)
+		}
+	})
+
+	t.Run("name and port are enough", func(t *testing.T) {
+		saveInstanceVars(t)
+		if err := loadInstance("minimal"); err != nil {
+			t.Fatal(err)
+		}
+		if storeDir != "store-minimal" || bridgePort != 8082 {
+			t.Errorf("store = %q, port = %d", storeDir, bridgePort)
+		}
+	})
+
+	t.Run("unknown instance lists what exists", func(t *testing.T) {
+		saveInstanceVars(t)
+		err := loadInstance("brasil")
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		// The message has to be actionable: a typo should show the real names.
+		for _, want := range []string{"brasil", "personal", "work"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q should mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("explicit environment wins", func(t *testing.T) {
+		saveInstanceVars(t)
+		t.Setenv("WHATSAPP_BRIDGE_PORT", "9999")
+		bridgePort = 9999
+		if err := loadInstance("personal"); err != nil {
+			t.Fatal(err)
+		}
+		if bridgePort != 9999 {
+			t.Errorf("env should override the conf file, got %d", bridgePort)
+		}
+	})
 }
 
 // Guards the actual point of the store setting: two instances must end up
