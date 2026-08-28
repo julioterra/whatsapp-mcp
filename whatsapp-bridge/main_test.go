@@ -213,6 +213,94 @@ minimal,  8082
 	})
 }
 
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+
+	// A path set in a JSON config or a settings file never goes through a
+	// shell, so the tilde arrives literally.
+	if got, want := expandHome("~/Claude/whatsapp"), filepath.Join(home, "Claude/whatsapp"); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got := expandHome("/tmp/absolute"); got != "/tmp/absolute" {
+		t.Errorf("absolute path should be untouched, got %q", got)
+	}
+	if got := expandHome(""); got != "" {
+		t.Errorf("empty should stay empty, got %q", got)
+	}
+	// Not a home reference: a directory that merely starts with a tilde.
+	if got := expandHome("~weird"); got != "~weird" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestMediaPath(t *testing.T) {
+	originalDir, originalName := mediaDir, instanceName
+	defer func() { mediaDir, instanceName = originalDir, originalName }()
+
+	instanceName = "personal"
+
+	t.Run("unset keeps attachments in the store", func(t *testing.T) {
+		mediaDir = ""
+		storeDir = "store-personal"
+		if got, want := mediaPath("alice@s.whatsapp.net"),
+			filepath.Join("store-personal", "alice@s.whatsapp.net"); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("configured directory is used", func(t *testing.T) {
+		mediaDir = "/Users/someone/Claude/whatsapp"
+		if got, want := mediaPath("alice@s.whatsapp.net"),
+			"/Users/someone/Claude/whatsapp/personal/alice@s.whatsapp.net"; got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	// A direct chat is named after the other person, so the same JID appears
+	// on every account. Without the account in the path, two accounts sharing
+	// a media directory would overwrite each other's copy of the same file.
+	t.Run("accounts do not collide in a shared directory", func(t *testing.T) {
+		mediaDir = "/shared"
+		instanceName = "personal"
+		personal := mediaPath("alice@s.whatsapp.net")
+		instanceName = "work"
+		work := mediaPath("alice@s.whatsapp.net")
+		if personal == work {
+			t.Errorf("both accounts resolved to %q", personal)
+		}
+	})
+}
+
+func TestLoadSettingsMediaDir(t *testing.T) {
+	original := mediaDir
+	defer func() { mediaDir = original }()
+
+	writeConf(t, `
+# a settings line has no comma; account lines always do
+media_dir = /tmp/claude-media
+
+personal, 8080, 15555550134, "Personal, with a comma"
+`)
+
+	mediaDir = ""
+	loadSettings()
+	if mediaDir != "/tmp/claude-media" {
+		t.Errorf("media_dir = %q", mediaDir)
+	}
+
+	// The account line must not be mistaken for a setting, nor vice versa.
+	saveInstanceVars(t)
+	if err := loadInstance("personal"); err != nil {
+		t.Fatal(err)
+	}
+	if instanceDescription != "Personal, with a comma" {
+		t.Errorf("description = %q", instanceDescription)
+	}
+}
+
 // Guards the actual point of the store setting: two instances must end up
 // with two separate databases, not one shared one.
 func TestNewMessageStoreUsesConfiguredDir(t *testing.T) {

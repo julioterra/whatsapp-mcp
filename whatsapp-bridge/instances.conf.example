@@ -28,3 +28,16 @@
 
 personal, 8080, 15551234567,   "My US number, family and friends"
 work,     8081, 5511988887777, "Work number in Brazil, colleagues and clients"
+
+
+# Where downloaded photos, PDFs and voice notes are saved.
+#
+# Without this they go inside this project folder, which is fine for the
+# program but a bad place to find a PDF later. Point it somewhere you and
+# Claude can both reach. ~/Claude is the folder Claude Desktop uses for files,
+# so this is usually the right answer:
+
+media_dir = ~/Claude/whatsapp
+
+# Files land in media_dir/<account name>/<chat>/, so two accounts never
+# overwrite each other's copy of the same file from the same person.

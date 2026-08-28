@@ -114,6 +114,14 @@ go run main.go personal      # name selects the entry
 
 `store-<name>` and the port are derived, so the only thing typed is the name. An unknown name errors and lists the names that do exist. The MCP server needs one variable, `WHATSAPP_INSTANCE_NAME`, and reads the same file for everything else.
 
+### Downloaded media
+
+Attachments default to `<store>/<chat_jid>/`, which keeps personal files inside the repo — gitignored, but also invisible to anything that isn't this program. `media_dir` in `instances.conf`, or `WHATSAPP_MEDIA_DIR`, moves them; `~/Claude/whatsapp` is the useful answer since that is Claude Desktop's own files folder.
+
+When set, the path is `<media_dir>/<instance>/<chat_jid>/`. The account level is not decoration: a direct chat is named after the *other* party, so the same JID appears on every account, and two accounts sharing a media directory would otherwise overwrite each other's copy of `Document.pdf` from the same sender. Keep it if you touch `mediaPath`.
+
+Leading `~` is expanded in Go, because a value coming from a JSON config or the settings file never passes through a shell.
+
 ### The label must not be able to lie
 
 Which account a bridge serves is decided by **whichever phone scans the QR code**. The name is only a label, so nothing structurally prevented scanning the Brazilian phone into `store-us` and having Claude confidently report Brazilian messages as US ones.
@@ -142,6 +150,7 @@ Relative `WHATSAPP_STORE_DIR` resolves against `whatsapp-bridge/` in both proces
 | `WHATSAPP_BRIDGE_URL` | `http://localhost:<port>` |
 | `WHATSAPP_INSTANCE_DESCRIPTION` | the conf file's description |
 | `WHATSAPP_INSTANCES_FILE` | `instances.conf` |
+| `WHATSAPP_MEDIA_DIR` | unset — attachments stay in `<store>/` |
 | `WHATSAPP_MESSAGES_DB` | `<store>/messages.db` |
 | `WHATSAPP_TRANSCRIPTS_DB` | `<store>/transcriptions.db` |
 | `WHATSAPP_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` |

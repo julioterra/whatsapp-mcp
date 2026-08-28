@@ -168,6 +168,28 @@ Replace the two example lines with your own accounts, then save and close.
 
 Your phone numbers stay on your computer. This file is never uploaded or committed.
 
+### Where downloaded files are saved
+
+Photos, PDFs and voice notes aren't downloaded until you ask for them. By default they're written inside this project folder — fine for the program, a bad place to go looking for a PDF later.
+
+Add a line to `instances.conf` to put them somewhere useful:
+
+```
+media_dir = ~/Claude/whatsapp
+```
+
+`~/Claude` is the folder Claude Desktop already uses for files, so that's usually the right answer. Any folder works.
+
+Files land in `media_dir/<account name>/<chat>/`, so `personal` and `work` never overwrite each other's copy of the same document from the same person.
+
+The bridge prints where downloads are going when it starts, so you can check at a glance:
+
+```
+Downloads: /Users/you/Claude/whatsapp/personal
+```
+
+Leave the line out and nothing changes from before.
+
 ### 2. Start each account
 
 One Terminal window per account. To start the first:
@@ -292,6 +314,7 @@ Everything can also be overridden with environment variables, which take precede
 | `WHATSAPP_BRIDGE_URL` | `http://localhost:<port>` | server |
 | `WHATSAPP_INSTANCE_DESCRIPTION` | the description from `instances.conf` | both |
 | `WHATSAPP_INSTANCES_FILE` | `whatsapp-bridge/instances.conf` | both |
+| `WHATSAPP_MEDIA_DIR` | unset — downloads stay in `<store>/` | bridge |
 | `WHATSAPP_MESSAGES_DB` | `<store>/messages.db` | server |
 | `WHATSAPP_TRANSCRIPTS_DB` | `<store>/transcriptions.db` | server |
 | `WHATSAPP_WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | server |

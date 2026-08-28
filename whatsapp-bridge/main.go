@@ -151,6 +151,39 @@ func loadInstance(name string) error {
 		instancesFile, name, strings.Join(known, ", "))
 }
 
+// loadSettings applies whole-file settings from instances.conf — lines of the
+// form `key = value`, which apply to every account rather than describing one.
+// Account lines always contain commas, so the two never collide.
+//
+// This exists so a media directory can be set once in the file instead of
+// being typed on the command line at every launch.
+func loadSettings() {
+	data, err := os.ReadFile(instancesFile)
+	if err != nil {
+		return
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.Contains(line, ",") {
+			continue
+		}
+
+		key, value, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+
+		switch strings.TrimSpace(key) {
+		case "media_dir":
+			// An exported variable still wins, as everywhere else.
+			if !envSet("WHATSAPP_MEDIA_DIR") {
+				mediaDir = expandHome(unquote(value))
+			}
+		}
+	}
+}
+
 // unquote trims surrounding whitespace and a matching pair of double quotes,
 // so the quotes around a description are optional rather than load-bearing.
 func unquote(field string) string {
@@ -232,6 +265,37 @@ func envIntOr(key string, fallback int) int {
 // storePath builds a path inside this instance's store directory.
 func storePath(elem ...string) string {
 	return filepath.Join(append([]string{storeDir}, elem...)...)
+}
+
+// mediaDir is where downloaded attachments are written. Empty means the old
+// behaviour: inside the store, which is fine for the database but buries PDFs
+// and photos in the repo where other applications will not look for them.
+var mediaDir = expandHome(os.Getenv("WHATSAPP_MEDIA_DIR"))
+
+// expandHome resolves a leading ~, which a shell would expand but a value set
+// in a JSON config or a settings file would not.
+func expandHome(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(home, strings.TrimPrefix(path, "~"))
+	}
+	return path
+}
+
+// mediaPath returns the directory for one chat's downloaded attachments.
+//
+// When a media directory is configured, the account name is part of the path.
+// A direct chat is identified by the other person's JID, which is the same
+// string on every account, so two accounts sharing a media directory would
+// otherwise overwrite each other's copy of "Document.pdf" from the same sender.
+func mediaPath(chatJID string) string {
+	if mediaDir == "" {
+		return storePath(chatJID)
+	}
+	return filepath.Join(mediaDir, instanceName, chatJID)
 }
 
 // Message represents a chat message for our client
@@ -765,7 +829,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	var err error
 
 	// First, check if we already have this file
-	chatDir := storePath(strings.ReplaceAll(chatJID, ":", "_"))
+	chatDir := mediaPath(strings.ReplaceAll(chatJID, ":", "_"))
 	localPath := ""
 
 	// Get media info from the database
@@ -996,6 +1060,8 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 func main() {
 	// Say which account this process serves, so two bridges in two terminals
 	// are told apart at a glance.
+	loadSettings()
+
 	// `go run main.go us` selects an instance from instances.conf.
 	if len(os.Args) > 1 {
 		if err := loadInstance(os.Args[1]); err != nil {
@@ -1007,6 +1073,13 @@ func main() {
 	fmt.Printf("Instance: %s   store: %s   port: %d\n", instanceName, storeDir, bridgePort)
 	if expectedNumber != "" {
 		fmt.Printf("Expecting account: +%s\n", normalizeNumber(expectedNumber))
+	}
+	// Where attachments land is worth stating: it is the one path a person
+	// needs to find from outside this program.
+	if mediaDir != "" {
+		fmt.Printf("Downloads: %s\n", filepath.Join(mediaDir, instanceName))
+	} else {
+		fmt.Printf("Downloads: %s (set media_dir in %s to change)\n", storeDir, instancesFile)
 	}
 
 	// Set up logger
