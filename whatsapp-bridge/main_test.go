@@ -1,11 +1,19 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"go.mau.fi/whatsmeow"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestEnvOr(t *testing.T) {
@@ -454,4 +462,155 @@ func TestExtractDirectPathStartsWithSlash(t *testing.T) {
 	if got[0] != '/' {
 		t.Errorf("direct path must start with a slash, got %q", got)
 	}
+}
+
+// History sync and on-demand backfill both arrive as batches of old messages.
+// Neither may drag a chat backwards in the list_chats ordering.
+func TestStoreChatKeepsLatestTimestamp(t *testing.T) {
+	original := storeDir
+	defer func() { storeDir = original }()
+	storeDir = filepath.Join(t.TempDir(), "store-test")
+
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("creating the store: %v", err)
+	}
+	defer store.Close()
+
+	const jid = "120363000000000001@g.us"
+	const name = "Test Group"
+	recent := time.Date(2026, 8, 28, 11, 3, 27, 0, time.UTC)
+	backfilled := time.Date(2026, 5, 28, 11, 45, 55, 0, time.UTC)
+
+	if err := store.StoreChat(jid, name, recent); err != nil {
+		t.Fatalf("storing the recent message: %v", err)
+	}
+	if err := store.StoreChat(jid, name, backfilled); err != nil {
+		t.Fatalf("storing the backfilled message: %v", err)
+	}
+
+	if got := storedChatTime(t, store, jid); !got.Equal(recent) {
+		t.Errorf("a backfilled message moved the chat backwards: got %s, want %s", got, recent)
+	}
+
+	// A genuinely newer message still moves it forward.
+	newer := recent.Add(time.Hour)
+	if err := store.StoreChat(jid, name, newer); err != nil {
+		t.Fatalf("storing the newer message: %v", err)
+	}
+	if got := storedChatTime(t, store, jid); !got.Equal(newer) {
+		t.Errorf("a newer message did not move the chat forward: got %s, want %s", got, newer)
+	}
+}
+
+func storedChatTime(t *testing.T, store *MessageStore, jid string) time.Time {
+	t.Helper()
+	var epoch int64
+	err := store.db.QueryRow("SELECT strftime('%s', last_message_time) FROM chats WHERE jid = ?", jid).Scan(&epoch)
+	if err != nil {
+		t.Fatalf("reading last_message_time: %v", err)
+	}
+	return time.Unix(epoch, 0).UTC()
+}
+
+// A message the bridge cannot store has to say what it was. Without this the
+// only trace of a dropped message is its absence, which is indistinguishable
+// from a message that never arrived at all.
+func TestMessageTypeName(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *waProto.Message
+		want string
+	}{
+		{"nil", nil, "nil"},
+		{"empty", &waProto.Message{}, "empty"},
+		{"plain text", &waProto.Message{Conversation: proto.String("bom dia")}, "conversation"},
+		{"reaction", &waProto.Message{ReactionMessage: &waProto.ReactionMessage{}}, "reactionMessage"},
+		// The shape that cost this install a message: from history sync an
+		// edit arrives as a protocolMessage carrying the new body, and neither
+		// extractor looks inside one.
+		{"edit", &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{}}, "protocolMessage"},
+	}
+
+	for _, tt := range tests {
+		if got := messageTypeName(tt.msg); got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+// messageContextInfo rides along on nearly every message and would bury the
+// field that actually says what the message was.
+func TestMessageTypeNameIgnoresContextInfo(t *testing.T) {
+	msg := &waProto.Message{
+		Conversation:       proto.String("bom dia"),
+		MessageContextInfo: &waProto.MessageContextInfo{},
+	}
+	if got, want := messageTypeName(msg), "conversation"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// The bug this guards against: from history sync an edited message arrives as
+// a bare protocolMessage carrying the new body under the *original* message's
+// ID. Reading fields straight off the WebMessageInfo — as handleHistorySync
+// used to — finds no text and drops it silently, which is how this install
+// lost a message it had already stored correctly from the live path.
+func TestHistorySyncEditIsStorable(t *testing.T) {
+	client := testClient(t)
+
+	const originalID = "3BAAAAAAAAAAAAAAAAAA"
+	const editID = "3BFFFFFFFFFFFFFFFFFF"
+	const body = "Mensagem de teste"
+	chatJID := types.JID{User: "120363000000000001", Server: types.GroupServer}
+
+	webMsg := &waProto.WebMessageInfo{
+		Key: &waProto.MessageKey{
+			RemoteJID: proto.String(chatJID.String()),
+			FromMe:    proto.Bool(true),
+			ID:        proto.String(editID),
+		},
+		MessageTimestamp: proto.Uint64(uint64(time.Date(2026, 8, 28, 10, 19, 11, 0, time.UTC).Unix())),
+		Message: &waProto.Message{
+			ProtocolMessage: &waProto.ProtocolMessage{
+				Key:           &waProto.MessageKey{ID: proto.String(originalID)},
+				Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				EditedMessage: &waProto.Message{Conversation: proto.String(body)},
+			},
+		},
+	}
+
+	// What the old code did. It finds nothing, and nothing is what got stored.
+	if got := extractTextContent(webMsg.GetMessage()); got != "" {
+		t.Fatalf("premise of this test is wrong: raw extraction found %q", got)
+	}
+
+	evt, err := client.ParseWebMessage(chatJID, webMsg)
+	if err != nil {
+		t.Fatalf("parsing the history message: %v", err)
+	}
+
+	if got := extractTextContent(evt.Message); got != body {
+		t.Errorf("edited body: got %q, want %q", got, body)
+	}
+	// The edit has to land on the message it edits, not add a second row.
+	if evt.Info.ID != originalID {
+		t.Errorf("edit filed under %q, want the original %q", evt.Info.ID, originalID)
+	}
+}
+
+// A client with an identity but no connection. ParseWebMessage only needs the
+// former: it resolves "from me" against the linked account.
+func testClient(t *testing.T) *whatsmeow.Client {
+	t.Helper()
+
+	dsn := "file:" + filepath.Join(t.TempDir(), "whatsapp.db") + "?_foreign_keys=on"
+	container, err := sqlstore.New(context.Background(), "sqlite3", dsn, waLog.Noop)
+	if err != nil {
+		t.Fatalf("creating the device store: %v", err)
+	}
+	device := container.NewDevice()
+	device.ID = &types.JID{User: "15550001111", Server: types.DefaultUserServer}
+
+	return whatsmeow.NewClient(device, waLog.Noop)
 }

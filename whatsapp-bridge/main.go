@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,6 +32,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Per-instance configuration, read once at startup. One checkout can serve
@@ -407,10 +409,24 @@ func (store *MessageStore) Close() error {
 	return store.db.Close()
 }
 
-// Store a chat in the database
+// Store a chat in the database.
+//
+// last_message_time only ever moves forward. History sync and on-demand
+// backfill both arrive as batches of old messages, and a plain INSERT OR
+// REPLACE lets one of those drag a chat backwards in the list_chats ordering.
+// strftime normalises the stored offset, so the comparison survives a machine
+// that changes timezone.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
-		"INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
+		`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
+		 ON CONFLICT(jid) DO UPDATE SET
+			name = excluded.name,
+			last_message_time = CASE
+				WHEN chats.last_message_time IS NULL
+					OR strftime('%s', excluded.last_message_time) > strftime('%s', chats.last_message_time)
+				THEN excluded.last_message_time
+				ELSE chats.last_message_time
+			END`,
 		jid, name, lastMessageTime,
 	)
 	return err
@@ -717,6 +733,71 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 	return "", "", "", nil, nil, nil, 0
 }
 
+// messageTypeName names the fields actually set on a message, so a message the
+// bridge cannot store says what it was instead of vanishing. Reading it out of
+// the protobuf rather than a hand-written switch means a message type added
+// upstream still gets named rather than logged as "unknown".
+func messageTypeName(msg *waProto.Message) string {
+	if msg == nil {
+		return "nil"
+	}
+	var names []string
+	msg.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		// Present on nearly every message and never the interesting part.
+		if fd.Name() != "messageContextInfo" {
+			names = append(names, string(fd.Name()))
+		}
+		return true
+	})
+	if len(names) == 0 {
+		return "empty"
+	}
+	sort.Strings(names)
+	return strings.Join(names, "+")
+}
+
+// storeMessageEvent persists one parsed message and reports what it stored.
+//
+// The live handler and history sync both go through here so the two cannot
+// drift apart on which message types they understand — a divergence that
+// silently cost this install messages that only history sync ever carried.
+func storeMessageEvent(messageStore *MessageStore, chatJID string, msg *events.Message, logger waLog.Logger) (content, mediaType, filename string, stored bool) {
+	content = extractTextContent(msg.Message)
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
+
+	if content == "" && mediaType == "" {
+		// Usually harmless — reactions, receipts and revocations have nothing
+		// to store. But a silent drop here is indistinguishable from a message
+		// that never arrived, and telling those two apart after the fact is
+		// expensive, so say which type went unstored.
+		logger.Debugf("Not storing %s in %s: no text or media (%s)",
+			msg.Info.ID, chatJID, messageTypeName(msg.Message))
+		return "", "", "", false
+	}
+
+	err := messageStore.StoreMessage(
+		msg.Info.ID,
+		chatJID,
+		msg.Info.Sender.User,
+		content,
+		msg.Info.Timestamp,
+		msg.Info.IsFromMe,
+		mediaType,
+		filename,
+		url,
+		mediaKey,
+		fileSHA256,
+		fileEncSHA256,
+		fileLength,
+	)
+	if err != nil {
+		logger.Warnf("Failed to store message %s in %s: %v", msg.Info.ID, chatJID, err)
+		return "", "", "", false
+	}
+
+	return content, mediaType, filename, true
+}
+
 // Handle regular incoming messages with media support
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
 	// Save message to database
@@ -732,50 +813,23 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		logger.Warnf("Failed to store chat: %v", err)
 	}
 
-	// Extract text content
-	content := extractTextContent(msg.Message)
-
-	// Extract media info
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
-
-	// Skip if there's no content and no media
-	if content == "" && mediaType == "" {
+	content, mediaType, filename, stored := storeMessageEvent(messageStore, chatJID, msg, logger)
+	if !stored {
 		return
 	}
 
-	// Store message in database
-	err = messageStore.StoreMessage(
-		msg.Info.ID,
-		chatJID,
-		sender,
-		content,
-		msg.Info.Timestamp,
-		msg.Info.IsFromMe,
-		mediaType,
-		filename,
-		url,
-		mediaKey,
-		fileSHA256,
-		fileEncSHA256,
-		fileLength,
-	)
+	// Log message reception
+	timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
+	direction := "←"
+	if msg.Info.IsFromMe {
+		direction = "→"
+	}
 
-	if err != nil {
-		logger.Warnf("Failed to store message: %v", err)
-	} else {
-		// Log message reception
-		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
-		direction := "←"
-		if msg.Info.IsFromMe {
-			direction = "→"
-		}
-
-		// Log based on message type
-		if mediaType != "" {
-			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
-		} else if content != "" {
-			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
-		}
+	// Log based on message type
+	if mediaType != "" {
+		fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
+	} else if content != "" {
+		fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
 	}
 }
 
@@ -1360,6 +1414,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
 
 	syncedCount := 0
+	skippedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
 		// Parse JID from the conversation
 		if conversation.ID == nil {
@@ -1378,123 +1433,58 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		// Get appropriate chat name by passing the history sync conversation directly
 		name := GetChatName(client, messageStore, jid, chatJID, conversation, "", logger)
 
-		// Process messages
-		messages := conversation.Messages
-		if len(messages) > 0 {
-			// Update chat with latest message timestamp
-			latestMsg := messages[0]
-			if latestMsg == nil || latestMsg.Message == nil {
+		// ParseWebMessage gives history sync the same unwrapping the live path
+		// gets from UnwrapRaw: deviceSent, ephemeral, view-once,
+		// documentWithCaption, and edits. Reading fields straight off the raw
+		// WebMessageInfo instead — as this did — meant an edited message
+		// arrived as a bare protocolMessage, produced no text, and was dropped
+		// without a trace. Anything that understands a live message now
+		// understands a history one; keep it that way.
+		var latest time.Time
+		for _, msg := range conversation.GetMessages() {
+			if msg == nil || msg.Message == nil {
 				continue
 			}
 
-			// Get timestamp from message info
-			timestamp := time.Time{}
-			if ts := latestMsg.Message.GetMessageTimestamp(); ts != 0 {
-				timestamp = time.Unix(int64(ts), 0)
+			evt, err := client.ParseWebMessage(jid, msg.Message)
+			if err != nil {
+				logger.Warnf("Failed to parse history message in %s: %v", chatJID, err)
+				skippedCount++
+				continue
+			}
+
+			// The chat timestamp follows every message that parsed, not just
+			// the storable ones, so a chat of nothing but reactions still gets
+			// a row. It used to come from conversation.Messages[0], which also
+			// meant one unusable message at the head skipped the whole chat.
+			if evt.Info.Timestamp.After(latest) {
+				latest = evt.Info.Timestamp
+			}
+
+			content, mediaType, filename, stored := storeMessageEvent(messageStore, chatJID, evt, logger)
+			if !stored {
+				skippedCount++
+				continue
+			}
+
+			syncedCount++
+			if mediaType != "" {
+				logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
+					evt.Info.Timestamp.Format("2006-01-02 15:04:05"), evt.Info.Sender.User, chatJID, mediaType, filename, content)
 			} else {
-				continue
+				logger.Infof("Stored message: [%s] %s -> %s: %s",
+					evt.Info.Timestamp.Format("2006-01-02 15:04:05"), evt.Info.Sender.User, chatJID, content)
 			}
+		}
 
-			messageStore.StoreChat(chatJID, name, timestamp)
-
-			// Store messages
-			for _, msg := range messages {
-				if msg == nil || msg.Message == nil {
-					continue
-				}
-
-				// Extract text content
-				var content string
-				if msg.Message.Message != nil {
-					if conv := msg.Message.Message.GetConversation(); conv != "" {
-						content = conv
-					} else if ext := msg.Message.Message.GetExtendedTextMessage(); ext != nil {
-						content = ext.GetText()
-					}
-				}
-
-				// Extract media info
-				var mediaType, filename, url string
-				var mediaKey, fileSHA256, fileEncSHA256 []byte
-				var fileLength uint64
-
-				if msg.Message.Message != nil {
-					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
-				}
-
-				// Log the message content for debugging
-				logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
-
-				// Skip messages with no content and no media
-				if content == "" && mediaType == "" {
-					continue
-				}
-
-				// Determine sender
-				var sender string
-				isFromMe := false
-				if msg.Message.Key != nil {
-					if msg.Message.Key.FromMe != nil {
-						isFromMe = *msg.Message.Key.FromMe
-					}
-					if !isFromMe && msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "" {
-						sender = *msg.Message.Key.Participant
-					} else if isFromMe {
-						sender = client.Store.ID.User
-					} else {
-						sender = jid.User
-					}
-				} else {
-					sender = jid.User
-				}
-
-				// Store message
-				msgID := ""
-				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
-					msgID = *msg.Message.Key.ID
-				}
-
-				// Get message timestamp
-				timestamp := time.Time{}
-				if ts := msg.Message.GetMessageTimestamp(); ts != 0 {
-					timestamp = time.Unix(int64(ts), 0)
-				} else {
-					continue
-				}
-
-				err = messageStore.StoreMessage(
-					msgID,
-					chatJID,
-					sender,
-					content,
-					timestamp,
-					isFromMe,
-					mediaType,
-					filename,
-					url,
-					mediaKey,
-					fileSHA256,
-					fileEncSHA256,
-					fileLength,
-				)
-				if err != nil {
-					logger.Warnf("Failed to store history message: %v", err)
-				} else {
-					syncedCount++
-					// Log successful message storage
-					if mediaType != "" {
-						logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
-					} else {
-						logger.Infof("Stored message: [%s] %s -> %s: %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
-					}
-				}
+		if !latest.IsZero() {
+			if err := messageStore.StoreChat(chatJID, name, latest); err != nil {
+				logger.Warnf("Failed to store chat %s: %v", chatJID, err)
 			}
 		}
 	}
 
-	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+	fmt.Printf("History sync complete. Stored %d messages, skipped %d.\n", syncedCount, skippedCount)
 }
 
 // Request history sync from the server
