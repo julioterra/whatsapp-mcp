@@ -599,6 +599,51 @@ func TestHistorySyncEditIsStorable(t *testing.T) {
 	}
 }
 
+// The message this install actually lost was 584 characters over six lines,
+// which WhatsApp carries as an extendedTextMessage rather than a conversation.
+// Same protocolMessage wrapper, different field inside it.
+func TestHistorySyncEditOfLongTextIsStorable(t *testing.T) {
+	client := testClient(t)
+
+	const originalID = "3BAAAAAAAAAAAAAAAAAA"
+	body := "Mensagem de teste:\n\n1. Primeiro item\n2. Segundo item"
+	chatJID := types.JID{User: "120363000000000001", Server: types.GroupServer}
+
+	webMsg := &waProto.WebMessageInfo{
+		Key: &waProto.MessageKey{
+			RemoteJID: proto.String(chatJID.String()),
+			FromMe:    proto.Bool(true),
+			ID:        proto.String("3BFFFFFFFFFFFFFFFFFF"),
+		},
+		MessageTimestamp: proto.Uint64(uint64(time.Date(2026, 8, 28, 10, 19, 11, 0, time.UTC).Unix())),
+		Message: &waProto.Message{
+			ProtocolMessage: &waProto.ProtocolMessage{
+				Key:  &waProto.MessageKey{ID: proto.String(originalID)},
+				Type: waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				EditedMessage: &waProto.Message{
+					ExtendedTextMessage: &waProto.ExtendedTextMessage{Text: proto.String(body)},
+				},
+			},
+		},
+	}
+
+	if got := extractTextContent(webMsg.GetMessage()); got != "" {
+		t.Fatalf("premise of this test is wrong: raw extraction found %q", got)
+	}
+
+	evt, err := client.ParseWebMessage(chatJID, webMsg)
+	if err != nil {
+		t.Fatalf("parsing the history message: %v", err)
+	}
+
+	if got := extractTextContent(evt.Message); got != body {
+		t.Errorf("edited body: got %q, want %q", got, body)
+	}
+	if evt.Info.ID != originalID {
+		t.Errorf("edit filed under %q, want the original %q", evt.Info.ID, originalID)
+	}
+}
+
 // A client with an identity but no connection. ParseWebMessage only needs the
 // former: it resolves "from me" against the linked account.
 func testClient(t *testing.T) *whatsmeow.Client {
