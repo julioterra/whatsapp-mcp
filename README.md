@@ -43,6 +43,19 @@ Reads and writes take different paths, which is worth knowing when something loo
 
 Media is stored as **metadata only**. Incoming messages record the URL and decryption keys; nothing is fetched until a tool asks for it. Nothing downloads in the background.
 
+### How messages arrive
+
+Two paths, and they are not equally trustworthy:
+
+- **Live** — anything that arrives while the bridge is running, including messages WhatsApp buffered while your machine was asleep and delivers on reconnect. This path is reliable. A closed laptop is not a problem: macOS wakes roughly every 15 minutes to keep the connection alive, and messages sent during those gaps arrive on the next wake.
+- **History sync** — a bulk backfill that your *phone* generates, sent only when you pair a new device. It is best-effort and incomplete. Measured on a real account, a fresh sync omitted about 3% of a month's messages, including ones sent the same day.
+
+Both paths go through whatsmeow's `ParseWebMessage`, so a message means the same thing whichever way it arrives. They used to diverge, and history sync silently dropped **every edited message** — an edit arrives as a bare `protocolMessage` carrying the new text under the original message's ID, and the old code found no text in it and moved on without logging.
+
+**Restarting a bridge never backfills.** Reconnecting reuses the existing device session: you get new and buffered messages, but no history sync. Only pairing produces one.
+
+**Never re-link to move machines.** Copy the whole `store-<name>/` directory instead. `whatsapp.db` carries the device identity and Signal session, so the new host *is* the same linked device — no QR, no history sync, nothing lost, and no device slot burned. The one rule is that the two copies must never run at the same time; one session driven from two places corrupts it.
+
 ## Requirements
 
 - Go
@@ -360,8 +373,11 @@ The Python test synthesises its own speech with macOS `say` rather than shipping
 | Sudden disconnect | Device unlinked, or WhatsApp's 4-device limit hit |
 | Second bridge won't start | Port already taken — give it its own `WHATSAPP_BRIDGE_PORT` |
 | Two instances show the same messages | They share a `WHATSAPP_STORE_DIR`. Give each its own and re-link |
+| A message you can see on your phone is missing | It only ever arrived through history sync, which is lossy. See [How messages arrive](#how-messages-arrive) |
 
 To reset a broken sync, delete `whatsapp-bridge/store/messages.db` and `whatsapp-bridge/store/whatsapp.db` and restart the bridge to re-authenticate. This discards local history, and WhatsApp only replays a bounded window, so older messages may not return.
+
+Treat that as a last resort rather than routine maintenance. Re-authenticating is the lossy path — the replacement history comes from the phone's best-effort backfill, so you can end up with *fewer* messages than you started with. Copy the store directory somewhere safe first; it is the only complete record you have, and the gaps a re-sync leaves can be filled back in from it afterwards.
 
 ## License
 
