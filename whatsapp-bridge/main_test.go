@@ -12,6 +12,7 @@ import (
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
@@ -658,4 +659,63 @@ func testClient(t *testing.T) *whatsmeow.Client {
 	device.ID = &types.JID{User: "15550001111", Server: types.DefaultUserServer}
 
 	return whatsmeow.NewClient(device, waLog.Noop)
+}
+
+// messages holds a foreign key to chats(jid), so a message inserted before its
+// chat is rejected outright. On a fresh store — which is exactly what a
+// history sync writes into — that is every message in the batch, and the only
+// symptom is a wall of "FOREIGN KEY constraint failed" warnings.
+func TestStoreConversationCreatesChatFirst(t *testing.T) {
+	original := storeDir
+	defer func() { storeDir = original }()
+	storeDir = filepath.Join(t.TempDir(), "store-test")
+
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("creating the store: %v", err)
+	}
+	defer store.Close()
+
+	const chatJID = "100000000000001@lid"
+	msgs := []*events.Message{
+		historyMessage(t, chatJID, "D7BBBBBBBBBBBBB53C", "bom dia", time.Date(2026, 8, 28, 10, 18, 51, 0, time.UTC)),
+		historyMessage(t, chatJID, "D7BBBBBBBBBBBBB53D", "tudo bem?", time.Date(2026, 8, 28, 10, 19, 11, 0, time.UTC)),
+	}
+
+	stored, skipped := storeConversation(store, chatJID, "Test", msgs, waLog.Noop)
+	if stored != len(msgs) || skipped != 0 {
+		t.Fatalf("stored %d and skipped %d, want %d and 0", stored, skipped, len(msgs))
+	}
+
+	var count int
+	if err := store.db.QueryRow("SELECT count(*) FROM messages WHERE chat_jid = ?", chatJID).Scan(&count); err != nil {
+		t.Fatalf("counting messages: %v", err)
+	}
+	if count != len(msgs) {
+		t.Errorf("stored message count: got %d, want %d", count, len(msgs))
+	}
+
+	// The chat carries the newest message in the batch, not the first one it
+	// happened to see.
+	if got, want := storedChatTime(t, store, chatJID), msgs[1].Info.Timestamp; !got.Equal(want) {
+		t.Errorf("chat timestamp: got %s, want %s", got, want)
+	}
+}
+
+func historyMessage(t *testing.T, chatJID, id, body string, ts time.Time) *events.Message {
+	t.Helper()
+
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", chatJID, err)
+	}
+
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: jid, Sender: jid},
+			ID:            id,
+			Timestamp:     ts,
+		},
+		Message: &waProto.Message{Conversation: proto.String(body)},
+	}
 }

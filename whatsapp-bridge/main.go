@@ -798,6 +798,56 @@ func storeMessageEvent(messageStore *MessageStore, chatJID string, msg *events.M
 	return content, mediaType, filename, true
 }
 
+// storeConversation persists one history sync conversation and reports how
+// many messages it stored and skipped.
+//
+// The chat row goes in first and unconditionally: messages hold a foreign key
+// to chats(jid), so a message inserted before its chat is rejected outright.
+// On a fresh store that is every message in the batch.
+//
+// The chat timestamp is the newest message in the batch. It used to come from
+// conversation.Messages[0], which also meant one unusable message at the head
+// discarded the whole conversation.
+func storeConversation(messageStore *MessageStore, chatJID, name string, msgs []*events.Message, logger waLog.Logger) (stored, skipped int) {
+	if len(msgs) == 0 {
+		return 0, 0
+	}
+
+	var latest time.Time
+	for _, evt := range msgs {
+		if evt.Info.Timestamp.After(latest) {
+			latest = evt.Info.Timestamp
+		}
+	}
+
+	if err := messageStore.StoreChat(chatJID, name, latest); err != nil {
+		// Without the chat row every message below would fail its foreign key,
+		// so report the whole batch as skipped rather than logging once per
+		// message about a problem that is not the message's.
+		logger.Warnf("Failed to store chat %s, skipping its %d messages: %v", chatJID, len(msgs), err)
+		return 0, len(msgs)
+	}
+
+	for _, evt := range msgs {
+		content, mediaType, filename, ok := storeMessageEvent(messageStore, chatJID, evt, logger)
+		if !ok {
+			skipped++
+			continue
+		}
+
+		stored++
+		if mediaType != "" {
+			logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
+				evt.Info.Timestamp.Format("2006-01-02 15:04:05"), evt.Info.Sender.User, chatJID, mediaType, filename, content)
+		} else {
+			logger.Infof("Stored message: [%s] %s -> %s: %s",
+				evt.Info.Timestamp.Format("2006-01-02 15:04:05"), evt.Info.Sender.User, chatJID, content)
+		}
+	}
+
+	return stored, skipped
+}
+
 // Handle regular incoming messages with media support
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
 	// Save message to database
@@ -1440,7 +1490,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		// arrived as a bare protocolMessage, produced no text, and was dropped
 		// without a trace. Anything that understands a live message now
 		// understands a history one; keep it that way.
-		var latest time.Time
+		parsed := make([]*events.Message, 0, len(conversation.GetMessages()))
 		for _, msg := range conversation.GetMessages() {
 			if msg == nil || msg.Message == nil {
 				continue
@@ -1452,36 +1502,12 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				skippedCount++
 				continue
 			}
-
-			// The chat timestamp follows every message that parsed, not just
-			// the storable ones, so a chat of nothing but reactions still gets
-			// a row. It used to come from conversation.Messages[0], which also
-			// meant one unusable message at the head skipped the whole chat.
-			if evt.Info.Timestamp.After(latest) {
-				latest = evt.Info.Timestamp
-			}
-
-			content, mediaType, filename, stored := storeMessageEvent(messageStore, chatJID, evt, logger)
-			if !stored {
-				skippedCount++
-				continue
-			}
-
-			syncedCount++
-			if mediaType != "" {
-				logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
-					evt.Info.Timestamp.Format("2006-01-02 15:04:05"), evt.Info.Sender.User, chatJID, mediaType, filename, content)
-			} else {
-				logger.Infof("Stored message: [%s] %s -> %s: %s",
-					evt.Info.Timestamp.Format("2006-01-02 15:04:05"), evt.Info.Sender.User, chatJID, content)
-			}
+			parsed = append(parsed, evt)
 		}
 
-		if !latest.IsZero() {
-			if err := messageStore.StoreChat(chatJID, name, latest); err != nil {
-				logger.Warnf("Failed to store chat %s: %v", chatJID, err)
-			}
-		}
+		stored, skipped := storeConversation(messageStore, chatJID, name, parsed, logger)
+		syncedCount += stored
+		skippedCount += skipped
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages, skipped %d.\n", syncedCount, skippedCount)
