@@ -147,6 +147,10 @@ Attachments default to `<store>/<chat_jid>/`, which keeps personal files inside 
 
 When set, the path is `<media_dir>/<instance>/<chat_jid>/`. The account level is not decoration: a direct chat is named after the *other* party, so the same JID appears on every account, and two accounts sharing a media directory would otherwise overwrite each other's copy of `Document.pdf` from the same sender. Keep it if you touch `mediaPath`.
 
+The file is saved as `<message id>_<name>`. The name on the message row is not unique and never was: image, video and audio names are generated from the send time at one-second resolution, and a document arrives with whatever name the sender typed, so one chat holds many messages all claiming to be `image_20260901_135344.jpg` and any two people can send `Contract.pdf`. History sync makes this the normal case rather than an edge case — it writes months of attachments at once.
+
+The consequence was worse than a lost file. `downloadMedia` treats an existing file as already downloaded and returns it without fetching, so asking for the second image handed back the *first* image's bytes under the second message's ID: the wrong picture, silently, with nothing in the logs. The message ID is half the primary key of `messages`, so prefixing it makes the name unique inside the chat directory while leaving the sender's own filename readable. `mediaFileName` also reduces that filename to a single path element, because `../../../x` is a legal thing for a sender to name a document.
+
 Path handling, all covered by tests: full paths, spaces and commas inside folder names, and optional surrounding quotes. `~/` is expanded in Go, because a value from `instances.conf` or a JSON config never passes through a shell and would otherwise create a directory literally named `~`. `~otheruser` is deliberately *not* imitated — `checkMediaDir` rejects it at startup rather than half-supporting shell syntax.
 
 Transcription follows the media directory automatically: `transcribe_audio` uses the absolute path the bridge returns from `/api/download` and never reconstructs one, so the Python side has no knowledge of the layout. Keep it that way. The transcript cache is keyed on `(message_id, chat_jid, model)` rather than the path, so moving `media_dir` does not invalidate existing transcripts. There is a test covering transcription from a path containing spaces and commas, since `mlx_whisper` shells out to ffmpeg.
@@ -275,6 +279,7 @@ Copy `messages.db` aside before doing it, always. Re-authenticating replaces a c
 | Send tools visible | Invariant broken. Stop and flag. |
 | Sudden disconnect | Device unlinked, or the 4-device cap was hit |
 | `CGO_ENABLED=0` build error | `go-sqlite3` needs cgo; a C toolchain must be on PATH |
+| Two attachments come back as the same file | Bridge is running a binary from before the media filename fix. Restart it, and delete the already-downloaded files that two messages claim |
 | Every media download returns 403 | Bridge is running a binary from before the direct-path fix. Restart it. |
 | Transcription fails on every file | `ffmpeg` missing, or not Apple Silicon (`mlx-whisper` will not have installed) |
 

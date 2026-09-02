@@ -696,27 +696,38 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
-// Extract media info from a message
-func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+// extractMediaInfo describes the attachment on a message, if it has one.
+//
+// The generated names are built from sentAt — when the message was sent — and
+// not from the clock at the moment the row is written. History sync writes
+// months of messages in one burst, so the clock would date every attachment in
+// a chat to the sync and sort them into one indistinguishable heap.
+//
+// These names are still not unique: they have one-second resolution, and a
+// document arrives with whatever name the sender gave it. mediaFileName is
+// what makes the file on disk unique.
+func extractMediaInfo(msg *waProto.Message, sentAt time.Time) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
 
+	stamp := sentAt.Format("20060102_150405")
+
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + time.Now().Format("20060102_150405") + ".jpg",
+		return "image", "image_" + stamp + ".jpg",
 			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
+		return "video", "video_" + stamp + ".mp4",
 			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + time.Now().Format("20060102_150405") + ".ogg",
+		return "audio", "audio_" + stamp + ".ogg",
 			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 
@@ -724,13 +735,47 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		filename := doc.GetFileName()
 		if filename == "" {
-			filename = "document_" + time.Now().Format("20060102_150405")
+			filename = "document_" + stamp
 		}
 		return "document", filename,
 			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
 	}
 
 	return "", "", "", nil, nil, nil, 0
+}
+
+// mediaFileName is the name one message's attachment is saved under.
+//
+// The name stored on the message is not unique. Generated names have
+// one-second resolution, and history sync writes far more than one attachment
+// per second, so a chat ends up holding many messages that all claim to be
+// image_20260901_135344.jpg. Documents are worse: two people sending
+// "Contract.pdf" collide however far apart they were sent.
+//
+// That mattered more than a lost file. downloadMedia treats an existing file
+// as already downloaded and returns it without fetching anything, so asking
+// for the second image handed back the first image's bytes under the second
+// message's ID — the wrong picture, silently, with nothing in the logs.
+//
+// A message ID is half the primary key of messages, so prefixing it makes the
+// name unique inside the chat's directory and leaves the sender's own filename
+// readable after it.
+func mediaFileName(messageID, filename string) string {
+	return pathComponent(messageID) + "_" + pathComponent(filename)
+}
+
+// pathComponent reduces a string to a single path element.
+//
+// A document filename arrives from the network like everything else here, and
+// "../../../../Library/LaunchAgents/x.plist" is a legal thing for a sender to
+// name a file. Base leaves ordinary names — including the spaces, commas and
+// accents real documents have — untouched.
+func pathComponent(s string) string {
+	s = filepath.Base(strings.ReplaceAll(s, "\\", "/"))
+	if s == "." || s == ".." || s == string(filepath.Separator) {
+		return "_"
+	}
+	return s
 }
 
 // messageTypeName names the fields actually set on a message, so a message the
@@ -763,7 +808,7 @@ func messageTypeName(msg *waProto.Message) string {
 // silently cost this install messages that only history sync ever carried.
 func storeMessageEvent(messageStore *MessageStore, chatJID string, msg *events.Message, logger waLog.Logger) (content, mediaType, filename string, stored bool) {
 	content = extractTextContent(msg.Message)
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msg.Info.Timestamp)
 
 	if content == "" && mediaType == "" {
 		// Usually harmless — reactions, receipts and revocations have nothing
@@ -1003,8 +1048,10 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
 	}
 
-	// Generate a local path for the file
-	localPath = fmt.Sprintf("%s/%s", chatDir, filename)
+	// Generate a local path for the file. The name on the message is not
+	// unique within a chat, so it is not what the file is saved under.
+	localName := mediaFileName(messageID, filename)
+	localPath = filepath.Join(chatDir, localName)
 
 	// Get absolute path
 	absPath, err := filepath.Abs(localPath)
@@ -1015,7 +1062,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	// Check if file already exists
 	if _, err := os.Stat(localPath); err == nil {
 		// File exists, return it
-		return true, mediaType, filename, absPath, nil
+		return true, mediaType, localName, absPath, nil
 	}
 
 	// If we don't have all the media info we need, we can't download
@@ -1065,7 +1112,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	fmt.Printf("Successfully downloaded %s media to %s (%d bytes)\n", mediaType, absPath, len(mediaData))
-	return true, mediaType, filename, absPath, nil
+	return true, mediaType, localName, absPath, nil
 }
 
 // Extract direct path from a WhatsApp media URL

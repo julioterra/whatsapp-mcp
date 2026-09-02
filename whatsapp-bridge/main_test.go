@@ -719,3 +719,164 @@ func historyMessage(t *testing.T, chatJID, id, body string, ts time.Time) *event
 		Message: &waProto.Message{Conversation: proto.String(body)},
 	}
 }
+
+// Two attachments in the same chat used to resolve to one path: generated
+// names have one-second resolution and a document carries whatever name the
+// sender chose. downloadMedia returns an existing file without fetching, so
+// the second message handed back the first one's bytes.
+func TestMediaFileNameIsUniquePerMessage(t *testing.T) {
+	first := mediaFileName("3EB0AAAAAAAAAAAAAAAA", "image_20260901_135344.jpg")
+	second := mediaFileName("3EB0BBBBBBBBBBBBBBBB", "image_20260901_135344.jpg")
+	if first == second {
+		t.Errorf("both messages resolved to %q", first)
+	}
+
+	// Same for two people sending a file with the same name, however far
+	// apart they sent it.
+	one := mediaFileName("3EB0AAAAAAAAAAAAAAAA", "Contract.pdf")
+	two := mediaFileName("3EB0BBBBBBBBBBBBBBBB", "Contract.pdf")
+	if one == two {
+		t.Errorf("both documents resolved to %q", one)
+	}
+}
+
+// The point of keeping the sender's filename is that a person can still tell
+// what the file is. Real documents have spaces, commas and accents.
+func TestMediaFileNameKeepsSenderName(t *testing.T) {
+	const sent = "Relatório Final, versão 2.pdf"
+	got := mediaFileName("3EB0AAAAAAAAAAAAAAAA", sent)
+	if !strings.HasSuffix(got, sent) {
+		t.Errorf("got %q, want it to end in %q", got, sent)
+	}
+	if !strings.HasSuffix(got, ".pdf") {
+		t.Errorf("got %q, want the extension preserved", got)
+	}
+}
+
+// A document filename arrives from the network, and a sender is free to name
+// a file anything at all.
+func TestMediaFileNameStaysInTheChatDirectory(t *testing.T) {
+	for _, name := range []string{
+		"../../../../Library/LaunchAgents/x.plist",
+		"/etc/passwd",
+		"..",
+		".",
+		"",
+		`..\..\windows\system32\evil.dll`,
+	} {
+		got := mediaFileName("3EB0AAAAAAAAAAAAAAAA", name)
+		if strings.ContainsRune(got, filepath.Separator) {
+			t.Errorf("%q produced %q, which is more than one path element", name, got)
+		}
+		if dir := filepath.Dir(filepath.Join("/chat", got)); dir != "/chat" {
+			t.Errorf("%q escaped to %q", name, dir)
+		}
+	}
+}
+
+// A message ID is not sender-controlled the way a document name is, but it is
+// still concatenated into a path.
+func TestMediaFileNameSanitizesTheMessageID(t *testing.T) {
+	got := mediaFileName("../../evil", "image_20260901_135344.jpg")
+	if strings.ContainsRune(got, filepath.Separator) {
+		t.Errorf("got %q, which is more than one path element", got)
+	}
+}
+
+// History sync delivers months of messages in one burst. Naming attachments
+// from the clock at that moment dates every one of them to the sync.
+func TestExtractMediaInfoNamesFromSendTime(t *testing.T) {
+	sent := time.Date(2026, 6, 28, 10, 15, 0, 0, time.UTC)
+	msg := &waProto.Message{ImageMessage: &waProto.ImageMessage{
+		URL: proto.String("https://mmg.whatsapp.net/d/f/AAAA.enc"),
+	}}
+
+	mediaType, filename, _, _, _, _, _ := extractMediaInfo(msg, sent)
+	if mediaType != "image" {
+		t.Fatalf("media type: got %q, want %q", mediaType, "image")
+	}
+	if got, want := filename, "image_20260628_101500.jpg"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A document keeps the name it was sent with; only a nameless one is
+// generated, and then from the send time too.
+func TestExtractMediaInfoKeepsDocumentName(t *testing.T) {
+	sent := time.Date(2026, 6, 28, 10, 15, 0, 0, time.UTC)
+
+	named := &waProto.Message{DocumentMessage: &waProto.DocumentMessage{
+		FileName: proto.String("Contract.pdf"),
+	}}
+	if _, got, _, _, _, _, _ := extractMediaInfo(named, sent); got != "Contract.pdf" {
+		t.Errorf("got %q, want %q", got, "Contract.pdf")
+	}
+
+	nameless := &waProto.Message{DocumentMessage: &waProto.DocumentMessage{}}
+	if _, got, _, _, _, _, _ := extractMediaInfo(nameless, sent); got != "document_20260628_101500" {
+		t.Errorf("got %q, want %q", got, "document_20260628_101500")
+	}
+}
+
+// The bug as it was reported: two images in one chat, asked for one after the
+// other, came back as the same picture. downloadMedia returns an existing file
+// without fetching anything, and both messages pointed at the same path.
+func TestDownloadMediaDoesNotServeAnotherMessagesFile(t *testing.T) {
+	originalStore, originalMedia, originalName := storeDir, mediaDir, instanceName
+	defer func() { storeDir, mediaDir, instanceName = originalStore, originalMedia, originalName }()
+	storeDir = filepath.Join(t.TempDir(), "store-test")
+	mediaDir, instanceName = "", "test"
+
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("creating the store: %v", err)
+	}
+	defer store.Close()
+
+	const chatJID = "100000000000001@lid"
+	const shared = "image_20260901_135344.jpg"
+	const firstID, secondID = "3EB0AAAAAAAAAAAAAAAA", "3EB0BBBBBBBBBBBBBBBB"
+	sent := time.Date(2026, 9, 1, 13, 53, 44, 0, time.UTC)
+
+	if err := store.StoreChat(chatJID, "Test", sent); err != nil {
+		t.Fatalf("storing the chat: %v", err)
+	}
+	// Both rows carry the same filename, which is what history sync produces:
+	// the name has one-second resolution and these were sent in one second.
+	for _, id := range []string{firstID, secondID} {
+		if err := store.StoreMessage(id, chatJID, "someone", "", sent, false,
+			"image", shared, "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("storing %s: %v", id, err)
+		}
+	}
+
+	// The first image has already been downloaded.
+	chatDir := mediaPath(chatJID)
+	if err := os.MkdirAll(chatDir, 0755); err != nil {
+		t.Fatalf("creating the chat directory: %v", err)
+	}
+	firstPath := filepath.Join(chatDir, mediaFileName(firstID, shared))
+	if err := os.WriteFile(firstPath, []byte("first image"), 0644); err != nil {
+		t.Fatalf("writing the first image: %v", err)
+	}
+
+	// Asking for it again is a cache hit, and still the right file.
+	ok, _, _, path, err := downloadMedia(nil, store, firstID, chatJID)
+	if err != nil || !ok {
+		t.Fatalf("first image: ok=%v err=%v", ok, err)
+	}
+	if got, want := filepath.Base(path), filepath.Base(firstPath); got != want {
+		t.Errorf("first image resolved to %q, want %q", got, want)
+	}
+
+	// The second must not be answered with the first one's file. These rows
+	// carry no URL, so the only honest outcomes are a download attempt or a
+	// failure — never a silent success pointing at the first image.
+	ok, _, _, path, err = downloadMedia(nil, store, secondID, chatJID)
+	if ok && path == firstPath {
+		t.Fatalf("second image was served the first image's file at %s", path)
+	}
+	if err == nil {
+		t.Errorf("second image: got success, want a download attempt to fail on the missing URL")
+	}
+}
